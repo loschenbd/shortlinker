@@ -87,7 +87,12 @@ Rules:
   logged, never fatal.
 - Target type is inferred: substring `://` → redirect target; otherwise a
   path handed to `open` (folders open in Finder automatically).
-- Reserved slug prefixes (cannot be registered): `o`, `api`.
+- Reserved slugs (cannot be registered): `o`, `api`. Exact-match reservation
+  suffices — slugs cannot contain `/`, so `open` or `apidocs` never collide
+  with the `/o/…` and `/api/…` routes.
+- `POST /api/links` requires `Content-Type: application/json`; other media
+  types get 415. This closes the cross-site "simple request" CSRF vector
+  against the hub's API.
 
 ## HTTP surface
 
