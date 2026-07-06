@@ -42,6 +42,9 @@ func (s *Server) Handler() http.Handler {
 	if s.store != nil { // hub role
 		mux.HandleFunc("GET /{slug}", s.handleShortlink)
 		mux.HandleFunc("GET /api/resolve/{slug}", s.handleResolve)
+		mux.HandleFunc("GET /api/links", s.handleListLinks)
+		mux.HandleFunc("POST /api/links", s.handleSetLink)
+		mux.HandleFunc("DELETE /api/links/{slug}", s.handleDeleteLink)
 	}
 	return mux
 }
@@ -150,4 +153,38 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) handleListLinks(w http.ResponseWriter, r *http.Request) {
+	links, err := s.store.All()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, links)
+}
+
+func (s *Server) handleSetLink(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Slug   string `json:"slug"`
+		Target string `json:"target"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if err := s.store.Set(body.Slug, body.Target); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"slug": body.Slug, "target": body.Target})
+}
+
+func (s *Server) handleDeleteLink(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	if err := s.store.Delete(slug); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"deleted": slug})
 }

@@ -170,3 +170,69 @@ func TestAgentHubUnreachable(t *testing.T) {
 		t.Errorf("body = %q, want hub-unreachable message", rec.Body.String())
 	}
 }
+
+func TestAPILinksList(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	rec := get(srv, "http://hub.ts.example/api/links", desktopUA)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var links map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &links); err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 2 || links["daily"] != "obsidian://daily?vault=Main" {
+		t.Errorf("links = %v", links)
+	}
+}
+
+func TestAPILinksAdd(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	body := strings.NewReader(`{"slug":"proj","target":"~/Code/my-app"}`)
+	req := httptest.NewRequest("POST", "http://hub.ts.example/api/links", body)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	target, ok, _ := srv.store.Get("proj")
+	if !ok || target != "~/Code/my-app" {
+		t.Errorf("Get(proj) = %q, %v", target, ok)
+	}
+}
+
+func TestAPILinksAddInvalid(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	for _, payload := range []string{
+		`{"slug":"Bad Slug","target":"/x"}`,
+		`{"slug":"api","target":"/x"}`,
+		`{"slug":"ok","target":""}`,
+		`not json`,
+	} {
+		req := httptest.NewRequest("POST", "http://hub.ts.example/api/links", strings.NewReader(payload))
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("payload %q: status = %d, want 400", payload, rec.Code)
+		}
+	}
+}
+
+func TestAPILinksDelete(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	req := httptest.NewRequest("DELETE", "http://hub.ts.example/api/links/budget", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if _, ok, _ := srv.store.Get("budget"); ok {
+		t.Error("budget still present after delete")
+	}
+	req = httptest.NewRequest("DELETE", "http://hub.ts.example/api/links/nope", nil)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown slug status = %d, want 404", rec.Code)
+	}
+}
