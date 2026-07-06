@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -36,8 +38,10 @@ func NewServer(store *Store, hubURL, port, home string) *Server {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /o/{slug}", s.handleOpen)
 	if s.store != nil { // hub role
 		mux.HandleFunc("GET /{slug}", s.handleShortlink)
+		mux.HandleFunc("GET /api/resolve/{slug}", s.handleResolve)
 	}
 	return mux
 }
@@ -72,4 +76,78 @@ func (s *Server) handleShortlink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "http://localhost:"+s.port+"/o/"+slug, http.StatusFound)
+}
+
+// handleOpen runs `open` on a registered slug's target. Loopback clients
+// only: the Host check blocks DNS-rebinding tricks.
+func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(r.Host); err == nil {
+		host = h
+	}
+	if host != "localhost" && host != "127.0.0.1" {
+		http.Error(w, "forbidden host", http.StatusForbidden)
+		return
+	}
+	slug := r.PathValue("slug")
+	target, ok, err := s.resolve(slug)
+	if err != nil {
+		http.Error(w, "hub unreachable — is it awake? ("+err.Error()+")", http.StatusBadGateway)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if err := s.open(ExpandPath(target, s.home)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, openedPage)
+}
+
+// resolve looks a slug up locally (hub) or via the hub's API (agent).
+func (s *Server) resolve(slug string) (string, bool, error) {
+	if s.store != nil {
+		return s.store.Get(slug)
+	}
+	resp, err := s.client.Get(s.hubURL + "/api/resolve/" + slug)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", false, fmt.Errorf("hub returned %s", resp.Status)
+	}
+	var body struct {
+		Target string `json:"target"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", false, err
+	}
+	return body.Target, true, nil
+}
+
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	target, ok, err := s.store.Get(slug)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"slug": slug, "target": target})
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
 }

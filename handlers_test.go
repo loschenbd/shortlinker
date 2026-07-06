@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -71,5 +73,100 @@ func TestShortlinkUnknownSlug404(t *testing.T) {
 	rec := get(srv, "http://hub.ts.example/nope", desktopUA)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestOpenRunsOpenOnRegisteredSlug(t *testing.T) {
+	srv, opened := newTestServer(t, testLinks)
+	rec := get(srv, "http://localhost:7777/o/budget", desktopUA)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	if len(*opened) != 1 || (*opened)[0] != "/Users/test/Documents/budget.numbers" {
+		t.Errorf("opened = %v, want expanded budget path", *opened)
+	}
+	if !strings.Contains(rec.Body.String(), "Opened") {
+		t.Errorf("body = %q, want done page", rec.Body.String())
+	}
+}
+
+func TestOpenRejectsForeignHost(t *testing.T) {
+	srv, opened := newTestServer(t, testLinks)
+	rec := get(srv, "http://evil.example:7777/o/budget", desktopUA)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if len(*opened) != 0 {
+		t.Errorf("opened = %v, want nothing", *opened)
+	}
+}
+
+func TestOpenUnknownSlug404(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	rec := get(srv, "http://localhost:7777/o/nope", desktopUA)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestOpenReportsOpenFailure(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	srv.open = func(target string) error { return fmt.Errorf("open failed: no such file") }
+	rec := get(srv, "http://localhost:7777/o/budget", desktopUA)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "no such file") {
+		t.Errorf("body = %q, want open error text", rec.Body.String())
+	}
+}
+
+func TestResolveEndpoint(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	rec := get(srv, "http://hub.ts.example/api/resolve/budget", desktopUA)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var body struct{ Slug, Target string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Slug != "budget" || body.Target != "~/Documents/budget.numbers" {
+		t.Errorf("body = %+v", body)
+	}
+	if rec := get(srv, "http://hub.ts.example/api/resolve/nope", desktopUA); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown slug status = %d, want 404", rec.Code)
+	}
+}
+
+func TestAgentResolvesViaHub(t *testing.T) {
+	hubSrv, _ := newTestServer(t, testLinks)
+	hub := httptest.NewServer(hubSrv.Handler())
+	defer hub.Close()
+
+	agent := NewServer(nil, hub.URL, "7777", "/Users/test")
+	opened := &[]string{}
+	agent.open = func(target string) error {
+		*opened = append(*opened, target)
+		return nil
+	}
+	rec := get(agent, "http://localhost:7777/o/budget", desktopUA)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	if len(*opened) != 1 || (*opened)[0] != "/Users/test/Documents/budget.numbers" {
+		t.Errorf("opened = %v", *opened)
+	}
+}
+
+func TestAgentHubUnreachable(t *testing.T) {
+	agent := NewServer(nil, "http://127.0.0.1:1", "7777", "/Users/test")
+	agent.open = func(target string) error { return nil }
+	rec := get(agent, "http://localhost:7777/o/budget", desktopUA)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "hub unreachable") {
+		t.Errorf("body = %q, want hub-unreachable message", rec.Body.String())
 	}
 }
