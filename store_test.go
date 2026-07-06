@@ -88,6 +88,27 @@ func TestStoreSetRejectsInvalid(t *testing.T) {
 	}
 }
 
+func TestStoreSetFailsOnUnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; chmod won't block reads")
+	}
+	s := newTestStore(t, "budget = /x\n")
+	if err := os.Chmod(s.Path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(s.Path, 0o644) }) // ensure temp dir is removable
+	if err := s.Set("new", "/y"); err == nil {
+		t.Fatal("Set should fail on unreadable file, but succeeded")
+	}
+	if err := os.Chmod(s.Path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(s.Path)
+	if string(data) != "budget = /x\n" {
+		t.Errorf("file content changed unexpectedly: %q", data)
+	}
+}
+
 func TestStoreDelete(t *testing.T) {
 	s := newTestStore(t, "# keep\nbudget = /x\ndaily = obsidian://daily\n")
 	if err := s.Delete("budget"); err != nil {

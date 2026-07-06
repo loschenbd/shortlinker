@@ -47,7 +47,10 @@ func (s *Store) Set(slug, target string) error {
 	if target == "" {
 		return fmt.Errorf("empty target")
 	}
-	lines := s.readLines()
+	lines, err := s.readLines()
+	if err != nil {
+		return err
+	}
 	newLine := slug + " = " + target
 	replaced := false
 	for i, line := range lines {
@@ -64,7 +67,10 @@ func (s *Store) Set(slug, target string) error {
 }
 
 func (s *Store) Delete(slug string) error {
-	lines := s.readLines()
+	lines, err := s.readLines()
+	if err != nil {
+		return err
+	}
 	kept := make([]string, 0, len(lines))
 	found := false
 	for _, line := range lines {
@@ -93,12 +99,18 @@ func lineSlug(line string) string {
 	return strings.TrimSpace(slug)
 }
 
-func (s *Store) readLines() []string {
+func (s *Store) readLines() ([]string, error) {
 	data, err := os.ReadFile(s.Path)
-	if err != nil || len(data) == 0 {
-		return nil
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(data) == 0 {
+		return nil, nil
+	}
+	return strings.Split(strings.TrimRight(string(data), "\n"), "\n"), nil
 }
 
 func (s *Store) writeLines(lines []string) error {

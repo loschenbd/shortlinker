@@ -186,10 +186,33 @@ func TestAPILinksList(t *testing.T) {
 	}
 }
 
+func TestAPILinksAddRejectsNonJSONContentType(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	body := strings.NewReader(`{"slug":"proj","target":"~/Code/my-app"}`)
+	req := httptest.NewRequest("POST", "http://hub.ts.example/api/links", body)
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want 415", rec.Code)
+	}
+	if _, ok, _ := srv.store.Get("proj"); ok {
+		t.Error("link was added despite wrong Content-Type")
+	}
+	var result map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["error"] != "Content-Type must be application/json" {
+		t.Errorf("error = %q, want %q", result["error"], "Content-Type must be application/json")
+	}
+}
+
 func TestAPILinksAdd(t *testing.T) {
 	srv, _ := newTestServer(t, testLinks)
 	body := strings.NewReader(`{"slug":"proj","target":"~/Code/my-app"}`)
 	req := httptest.NewRequest("POST", "http://hub.ts.example/api/links", body)
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -210,6 +233,7 @@ func TestAPILinksAddInvalid(t *testing.T) {
 		`not json`,
 	} {
 		req := httptest.NewRequest("POST", "http://hub.ts.example/api/links", strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {

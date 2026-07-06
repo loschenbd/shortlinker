@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net"
 	"net/http"
 	"os/exec"
@@ -78,6 +79,8 @@ func (s *Server) handleShortlink(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, macOnlyPage, slug)
 		return
 	}
+	// NOTE: all machines must run the agent on the same port (default 7777);
+	// the clicking Mac's local agent must be listening on this same port.
 	http.Redirect(w, r, "http://localhost:"+s.port+"/o/"+slug, http.StatusFound)
 }
 
@@ -165,6 +168,11 @@ func (s *Server) handleListLinks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetLink(w http.ResponseWriter, r *http.Request) {
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mediaType != "application/json" {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "Content-Type must be application/json"})
+		return
+	}
 	var body struct {
 		Slug   string `json:"slug"`
 		Target string `json:"target"`
