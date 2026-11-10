@@ -69,6 +69,23 @@ Moshi Desktop's chat view), and a phone shows it.
   delete the file.
 - `sl-link` is a symlink to the binary; `shortlinker link <path>` does the
   same.
+- `sl-link --finder <path>` prints the link with `?finder` on the end. On a
+  Mac that shows the file in Finder instead of opening it; a phone treats it
+  like the plain link. Use it for file names mentioned in passing.
+
+**Markdown on a phone.** For a `.md` file in a SilverBullet space, sl-link also
+runs `sb-link` once and saves the file's SilverBullet page with the link:
+
+    notes-md = ~/Documents/notes.md | https://<hub>.<tailnet>.ts.net:3000/notes
+
+A phone tapping the link goes to that page, where the file can be edited; a
+Mac still opens the file in its default app. Only sb-link's exit 0 counts
+(exit 4 prints a URL too, but SilverBullet was down and the space may not
+exist yet), and a link without a page falls back to plain text at `/f/`.
+Running sl-link on the file again fills in a missing page. sb-link takes
+several seconds, so it never runs when a link is tapped. The page can also
+be set through the local API:
+`POST /api/links/<slug>/phone {"url": "https://..."}`.
 
 sl-link's links go in their own section at the end of `links.txt`, under a
 `# Added by sl-link` line. Hand-made links stay above it, including ones
@@ -96,7 +113,11 @@ The API does the same as `sl-link` when you leave out the slug:
   and other executable files are shown in Finder instead of opened.
   (Note: iPads using desktop-class Safari report a Mac user agent and will see
   a connection error instead.)
-- File/folder target on a phone → 302 to `/f/<slug>`, where the hub serves
+- File target with a phone page (a Markdown file's SilverBullet page), on a
+  phone → 302 to that page.
+- `?finder` on a Mac → `http://localhost:7778/o/<slug>?reveal=1`, which shows
+  the file in Finder.
+- Any other file/folder target on a phone → 302 to `/f/<slug>`, where the hub serves
   the file itself (HTML renders, with `charset=utf-8`). A folder serves the
   files beneath it, `index.html` if there is one, or a listing. Markdown,
   scripts and other text files show as plain text. Any device can open

@@ -18,6 +18,14 @@ const revealedPage = `<!doctype html>
 <h1>Shown in Finder</h1><p>This link points to an app or a script, so it's shown in Finder instead of run.<br>You can close this tab.</p>
 `
 
+// shownPage is returned for a ?finder link, which shows the file in Finder.
+const shownPage = `<!doctype html>
+<meta charset="utf-8"><title>shortlinker</title>
+<body style="font-family:-apple-system,sans-serif;text-align:center;padding-top:20vh;color:#333">
+<h1>&#10003; Shown in Finder</h1><p>You can close this tab.</p>
+<script>window.close()</script>
+`
+
 // listingPage renders a served folder. The %s values are the escaped title
 // (twice) and the pre-escaped list items.
 const listingPage = `<!doctype html>

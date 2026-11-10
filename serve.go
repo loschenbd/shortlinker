@@ -47,11 +47,12 @@ func (s *Server) handleServe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slug := r.PathValue("slug")
-	target, auto, ok, err := s.store.Entry(slug)
+	link, ok, err := s.store.Lookup(slug)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	target, auto := link.Target, link.Auto
 	if !ok || IsRedirect(target) {
 		http.NotFound(w, r)
 		return

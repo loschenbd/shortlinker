@@ -74,6 +74,7 @@ func (s *Server) LocalHandler() http.Handler {
 		mux.HandleFunc("GET /api/links", s.handleListLinks)
 		mux.HandleFunc("POST /api/links", s.handleSetLink)
 		mux.HandleFunc("DELETE /api/links/{slug}", s.handleDeleteLink)
+		mux.HandleFunc("POST /api/links/{slug}/phone", s.handleSetPhone)
 		mux.HandleFunc("POST /api/prune", s.handlePrune)
 	}
 	return loopbackOnly(mux)
@@ -104,7 +105,7 @@ func isMobile(userAgent string) bool {
 // handleShortlink serves the canonical short URLs (hub role).
 func (s *Server) handleShortlink(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
-	target, ok, err := s.store.Get(slug)
+	link, ok, err := s.store.Lookup(slug)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -113,18 +114,27 @@ func (s *Server) handleShortlink(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if IsRedirect(target) {
-		http.Redirect(w, r, target, http.StatusFound)
+	if IsRedirect(link.Target) {
+		http.Redirect(w, r, link.Target, http.StatusFound)
 		return
 	}
-	// File/folder target: mobile can't open it, so the hub serves its
-	// contents; Macs bounce to their own local opener.
+	// File/folder target: a phone can't open it, so it gets the link's phone
+	// page (a Markdown file's SilverBullet page) or the file itself; Macs
+	// bounce to their own local opener.
 	if isMobile(r.UserAgent()) {
+		if link.Phone != "" {
+			http.Redirect(w, r, link.Phone, http.StatusFound)
+			return
+		}
 		http.Redirect(w, r, "/f/"+slug, http.StatusFound)
 		return
 	}
 	// NOTE: every Mac must run its opener on the same local port (default 7778).
-	http.Redirect(w, r, "http://localhost:"+s.localPort+"/o/"+slug, http.StatusFound)
+	dest := "http://localhost:" + s.localPort + "/o/" + slug
+	if r.URL.Query().Has("finder") { // ?finder: show it in Finder instead
+		dest += "?reveal=1"
+	}
+	http.Redirect(w, r, dest, http.StatusFound)
 }
 
 // handleOpen runs `open` on a registered slug's target (local port only).
@@ -143,7 +153,10 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	full := ExpandPath(target, s.home)
 	act, page := s.open, openedPage
-	if runsCode(full) {
+	switch {
+	case r.URL.Query().Get("reveal") == "1":
+		act, page = s.reveal, shownPage
+	case runsCode(full):
 		act, page = s.reveal, revealedPage
 	}
 	if err := act(full); err != nil {
@@ -264,7 +277,12 @@ func (s *Server) handleSetLink(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"slug": slug, "target": body.Target, "created": created})
+		link, _, err := s.store.Lookup(slug)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"slug": slug, "target": body.Target, "created": created, "phone": link.Phone})
 		return
 	}
 	if err := s.store.Set(body.Slug, body.Target); err != nil {
@@ -284,6 +302,26 @@ func (s *Server) handleDeleteLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": slug})
+}
+
+// handleSetPhone sets the page phones get for a file link. Body: {"url": "..."}.
+func (s *Server) handleSetPhone(w http.ResponseWriter, r *http.Request) {
+	if refuseWebWrite(w, r) {
+		return
+	}
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	slug := r.PathValue("slug")
+	if err := s.store.SetPhone(slug, body.URL); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"slug": slug, "phone": body.URL})
 }
 
 // handlePrune removes sl-link links whose file is gone. Body: {"dry_run": bool}.

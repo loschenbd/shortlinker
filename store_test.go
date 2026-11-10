@@ -213,8 +213,8 @@ func TestStoreEnsureStartsAutoSectionAndSetStaysAboveIt(t *testing.T) {
 		t.Errorf("file =\n%s\nwant\n%s", got, want)
 	}
 	for slug, wantAuto := range map[string]bool{"budget": false, "daily": false, "a-md": true} {
-		if _, auto, ok, _ := s.Entry(slug); !ok || auto != wantAuto {
-			t.Errorf("Entry(%s): auto = %v, ok = %v; want auto = %v", slug, auto, ok, wantAuto)
+		if l, ok, _ := s.Lookup(slug); !ok || l.Auto != wantAuto {
+			t.Errorf("Lookup(%s): auto = %v, ok = %v; want auto = %v", slug, l.Auto, ok, wantAuto)
 		}
 	}
 }
@@ -303,5 +303,42 @@ func TestStoreReadersNeverSeeHalfAFile(t *testing.T) {
 		if len(links) != 3000 {
 			t.Fatalf("read %d: saw %d links mid-save, want 3000", reads, len(links))
 		}
+	}
+}
+
+func TestStorePhonePages(t *testing.T) {
+	s := newTestStore(t, "pipe = ~/a | b.md\nweb = obsidian://x\n\n"+autoMarker+"\nnotes-md = ~/x/notes.md\n")
+	if err := s.SetPhone("notes-md", "https://sb.ts.net:3000/notes"); err != nil {
+		t.Fatal(err)
+	}
+	if l, _, _ := s.Lookup("notes-md"); l.Target != "~/x/notes.md" || l.Phone != "https://sb.ts.net:3000/notes" || !l.Auto {
+		t.Errorf("Lookup(notes-md) = %+v", l)
+	}
+	if l, _, _ := s.Lookup("pipe"); l.Target != "~/a | b.md" || l.Phone != "" {
+		t.Errorf("a path with \" | \" was split: %+v", l)
+	}
+	if slug, created, _ := s.Ensure("/Users/test/x/notes.md", "/Users/test"); slug != "notes-md" || created {
+		t.Errorf("Ensure matched %q, created = %v; want notes-md", slug, created)
+	}
+	if err := s.Set("notes-md", "~/x/notes.md"); err != nil {
+		t.Fatal(err)
+	}
+	if l, _, _ := s.Lookup("notes-md"); l.Phone == "" {
+		t.Error("re-setting the same target dropped the phone page")
+	}
+	if err := s.Set("notes-md", "~/x/other.md"); err != nil {
+		t.Fatal(err)
+	}
+	if l, _, _ := s.Lookup("notes-md"); l.Phone != "" {
+		t.Error("pointing the link at another file kept the old phone page")
+	}
+	for _, c := range [][2]string{{"web", "https://x"}, {"notes-md", "javascript:alert(1)"}, {"nope", "https://x"}} {
+		if err := s.SetPhone(c[0], c[1]); err == nil {
+			t.Errorf("SetPhone(%q, %q): want an error", c[0], c[1])
+		}
+	}
+	s2 := newTestStore(t, autoMarker+"\ngone-md = /nope/gone.md | https://sb/gone\n")
+	if removed, _ := s2.PruneAuto("/Users/test", false); strings.Join(removed, ",") != "gone-md" {
+		t.Errorf("prune with a phone page: removed %v", removed)
 	}
 }

@@ -26,11 +26,13 @@ const (
 // defaultLocalPort is the hub's loopback-only port, which holds the API.
 const defaultLocalPort = "7778"
 
-const linkUsage = `usage: sl-link <path>...   (or: shortlinker link <path>...)
+const linkUsage = `usage: sl-link [--finder] <path>...   (or: shortlinker link ...)
 
 Prints one link per file or folder. The link opens the file on whichever Mac
 you click it on (Ghostty, Moshi Desktop, Notion) and shows it on a phone.
-Linking the same path again gives the same link. Run it on the hub Mac.
+With --finder, a Mac shows it in Finder instead. A Markdown file in a
+SilverBullet space opens there on a phone (sl-link runs sb-link the first
+time). Linking the same path again gives the same link. Run it on the hub Mac.
 
 Exit codes: 0 ok; 1 other error; 2 no such file or folder; 4 hub unreachable.
 The hub's address comes from SHORTLINKER_URL, else ~/.config/shortlinker/url,
@@ -49,19 +51,41 @@ var errUnreachable = errors.New("hub unreachable")
 // errNoAPI means the address answered but isn't a hub (an opener agent).
 var errNoAPI = errors.New("this Mac isn't the shortlinker hub, so it can't make links")
 
-// linker registers a target with the hub and returns its slug.
-type linker func(target string) (string, error)
+// linker registers a target with the hub and returns its slug and its
+// phone page, if it has one.
+type linker func(target string) (slug, phone string, err error)
+
+// linkOptions are what linkPaths needs; tests swap in fakes.
+type linkOptions struct {
+	home, hubURL string
+	finder       bool // add ?finder: a Mac shows the file in Finder
+	register     linker
+	// phonePage finds the page phones should get for a Markdown file (its
+	// SilverBullet page); "" with no error means there isn't one.
+	phonePage func(abs string) (string, error)
+	savePhone func(slug, url string) error
+}
 
 func localAPI() string { return "http://127.0.0.1:" + defaultLocalPort }
 
 // runLink is the `sl-link` / `shortlinker link` entry point.
 func runLink(args []string) int {
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
-		fmt.Fprint(os.Stderr, linkUsage)
-		if len(args) == 0 {
-			return exitError
+	finder := false
+	var paths []string
+	for _, a := range args {
+		switch a {
+		case "-h", "--help":
+			fmt.Fprint(os.Stderr, linkUsage)
+			return exitOK
+		case "-f", "--finder":
+			finder = true
+		default:
+			paths = append(paths, a)
 		}
-		return exitOK
+	}
+	if len(paths) == 0 {
+		fmt.Fprint(os.Stderr, linkUsage)
+		return exitError
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -74,26 +98,33 @@ func runLink(args []string) int {
 		return exitError
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
-	register := func(target string) (string, error) { return postLink(client, localAPI(), target) }
-	return linkPaths(args, home, hubURL, register, os.Stdout, os.Stderr)
+	return linkPaths(paths, linkOptions{
+		home:      home,
+		hubURL:    hubURL,
+		finder:    finder,
+		register:  func(target string) (string, string, error) { return postLink(client, localAPI(), target) },
+		phonePage: silverBulletPage,
+		savePhone: func(slug, url string) error { return postPhone(client, localAPI(), slug, url) },
+	}, os.Stdout, os.Stderr)
 }
 
 // linkPaths links each path and prints its URL, one per line, in order.
-func linkPaths(paths []string, home, hubURL string, register linker, out, errOut io.Writer) int {
+func linkPaths(paths []string, o linkOptions, out, errOut io.Writer) int {
 	code := exitOK
 	for _, p := range paths {
-		abs, err := filepath.Abs(ExpandPath(p, home))
+		abs, err := filepath.Abs(ExpandPath(p, o.home))
 		if err != nil {
 			fmt.Fprintf(errOut, "sl-link: %s: %v\n", p, err)
 			code = exitError
 			continue
 		}
-		if _, err := os.Stat(abs); err != nil {
+		info, err := os.Stat(abs)
+		if err != nil {
 			fmt.Fprintf(errOut, "sl-link: %s: no such file or folder\n", p)
 			code = maxExit(code, exitNoSuchPath)
 			continue
 		}
-		slug, err := register(tildePath(abs, home))
+		slug, phone, err := o.register(tildePath(abs, o.home))
 		if err != nil {
 			fmt.Fprintf(errOut, "sl-link: %s: %v\n", p, err)
 			if errors.Is(err, errUnreachable) {
@@ -103,9 +134,51 @@ func linkPaths(paths []string, home, hubURL string, register linker, out, errOut
 			}
 			continue
 		}
-		fmt.Fprintf(out, "%s/%s\n", strings.TrimRight(hubURL, "/"), slug)
+		if phone == "" && !info.IsDir() && strings.EqualFold(filepath.Ext(abs), ".md") && o.phonePage != nil {
+			// The link works either way; without a page, phones get plain text.
+			if url, err := o.phonePage(abs); err != nil {
+				fmt.Fprintf(errOut, "sl-link: %s: no SilverBullet page, so phones get plain text: %v\n", p, err)
+			} else if url != "" {
+				if err := o.savePhone(slug, url); err != nil {
+					fmt.Fprintf(errOut, "sl-link: %s: couldn't save its SilverBullet page: %v\n", p, err)
+				}
+			}
+		}
+		link := strings.TrimRight(o.hubURL, "/") + "/" + slug
+		if o.finder {
+			link += "?finder"
+		}
+		fmt.Fprintln(out, link)
 	}
 	return code
+}
+
+// silverBulletPage runs sb-link on a Markdown file and returns the
+// SilverBullet page it prints. Only exit 0 counts: exit 4 prints a URL too,
+// but SilverBullet was down, so the space may not exist yet. sb-link takes
+// several seconds, which is why the page is saved with the link rather than
+// looked up on every tap.
+func silverBulletPage(abs string) (string, error) {
+	bin, err := exec.LookPath("sb-link")
+	if err != nil {
+		return "", nil // no SilverBullet on this Mac
+	}
+	var stderr bytes.Buffer
+	cmd := exec.Command(bin, abs)
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 2 {
+			return "", nil // not a Markdown file in a SilverBullet space
+		}
+		return "", fmt.Errorf("sb-link: %v %s", err, strings.TrimSpace(stderr.String()))
+	}
+	lines := strings.Fields(strings.TrimSpace(string(stdout)))
+	if len(lines) == 0 || !isWebURL(lines[len(lines)-1]) {
+		return "", fmt.Errorf("sb-link printed no URL")
+	}
+	return lines[len(lines)-1], nil
 }
 
 func maxExit(a, b int) int {
@@ -153,17 +226,23 @@ func postJSON(client *http.Client, url string, body, result any) error {
 	return nil
 }
 
-func postLink(client *http.Client, base, target string) (string, error) {
+func postLink(client *http.Client, base, target string) (slug, phone string, err error) {
 	var result struct {
-		Slug string `json:"slug"`
+		Slug  string `json:"slug"`
+		Phone string `json:"phone"`
 	}
 	if err := postJSON(client, strings.TrimRight(base, "/")+"/api/links", map[string]string{"target": target}, &result); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if result.Slug == "" {
-		return "", fmt.Errorf("hub sent no slug")
+		return "", "", fmt.Errorf("hub sent no slug")
 	}
-	return result.Slug, nil
+	return result.Slug, result.Phone, nil
+}
+
+func postPhone(client *http.Client, base, slug, url string) error {
+	var result map[string]string
+	return postJSON(client, strings.TrimRight(base, "/")+"/api/links/"+slug+"/phone", map[string]string{"url": url}, &result)
 }
 
 // runPrune is the `shortlinker prune` entry point.

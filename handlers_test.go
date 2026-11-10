@@ -408,3 +408,35 @@ func TestAPIPrune(t *testing.T) {
 		t.Errorf("after prune: %v, want gone-by-hand and kept-md", links)
 	}
 }
+
+func TestShortlinkSendsPhonesToPhonePage(t *testing.T) {
+	srv, _ := newTestServer(t, "notes = ~/Documents/notes.md | https://hub.ts.net:3000/notes\nplain = ~/Documents/plain.md\n")
+	for _, c := range []struct{ slug, ua, want string }{
+		{"notes", iphoneUA, "https://hub.ts.net:3000/notes"},
+		{"plain", iphoneUA, "/f/plain"},
+		{"notes", desktopUA, "http://localhost:7778/o/notes"},
+	} {
+		rec := get(srv, "http://hub.ts.example/"+c.slug, c.ua)
+		if rec.Code != http.StatusFound || rec.Header().Get("Location") != c.want {
+			t.Errorf("%s: %d -> %q, want 302 -> %q", c.slug, rec.Code, rec.Header().Get("Location"), c.want)
+		}
+	}
+}
+
+func TestFinderLinkShowsFileInFinder(t *testing.T) {
+	srv, opened := newTestServer(t, testLinks)
+	rec := get(srv, "http://hub.ts.example/budget?finder", desktopUA)
+	if loc := rec.Header().Get("Location"); loc != "http://localhost:7778/o/budget?reveal=1" {
+		t.Errorf("Mac: Location = %q", loc)
+	}
+	if loc := get(srv, "http://hub.ts.example/budget?finder", iphoneUA).Header().Get("Location"); loc != "/f/budget" {
+		t.Errorf("phone: Location = %q, want /f/budget", loc)
+	}
+	rec = get(srv, "http://localhost:7778/o/budget?reveal=1", desktopUA)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Shown in Finder") {
+		t.Errorf("/o/?reveal=1: %d %q", rec.Code, rec.Body.String())
+	}
+	if strings.Join(*opened, ",") != "reveal /Users/test/Documents/budget.numbers" {
+		t.Errorf("opened = %v", *opened)
+	}
+}

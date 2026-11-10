@@ -52,23 +52,74 @@ func ExpandPath(target, home string) string {
 	return target
 }
 
+// Link is one parsed line of links.txt.
+type Link struct {
+	Target string // a URL to redirect to, or a file/folder path
+	Phone  string // optional page phones get instead of the file (a SilverBullet page)
+	Auto   bool   // made by sl-link: below autoMarker
+}
+
+// phoneSep separates a target from its phone page:
+//
+//	notes-md = ~/Documents/notes.md | https://hub.ts.net:3000/notes
+const phoneSep = " | "
+
+// splitTarget splits a line's right-hand side into target and phone page.
+// It only splits off an http(s) URL, so a path that contains " | " is kept whole.
+func splitTarget(raw string) (target, phone string) {
+	if i := strings.LastIndex(raw, phoneSep); i >= 0 {
+		if p := strings.TrimSpace(raw[i+len(phoneSep):]); isWebURL(p) {
+			return strings.TrimSpace(raw[:i]), p
+		}
+	}
+	return raw, ""
+}
+
+func isWebURL(s string) bool {
+	return (strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "http://")) && !strings.ContainsAny(s, " \t")
+}
+
+// formatLine writes a link line.
+func formatLine(slug, target, phone string) string {
+	if phone != "" {
+		return slug + " = " + target + phoneSep + phone
+	}
+	return slug + " = " + target
+}
+
 // ParseLinks parses links.txt content into slug→target. Blank lines and
 // #-comments are ignored; malformed lines are skipped with a warning.
 func ParseLinks(content string) (map[string]string, []string) {
-	links := map[string]string{}
+	entries, warnings := parseEntries(content)
+	links := make(map[string]string, len(entries))
+	for slug, l := range entries {
+		links[slug] = l.Target
+	}
+	return links, warnings
+}
+
+// parseEntries is ParseLinks with each link's phone page and section.
+func parseEntries(content string) (map[string]Link, []string) {
+	links := map[string]Link{}
 	var warnings []string
+	auto := false
 	for i, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
+		if isAutoMarker(trimmed) {
+			auto = true
+			continue
+		}
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		slug, target, ok := strings.Cut(trimmed, "=")
-		slug, target = strings.TrimSpace(slug), strings.TrimSpace(target)
+		slug, raw, ok := strings.Cut(trimmed, "=")
+		slug = strings.TrimSpace(slug)
+		target, phone := splitTarget(strings.TrimSpace(raw))
 		if !ok || target == "" || !ValidSlug(slug) {
 			warnings = append(warnings, fmt.Sprintf("line %d: skipping malformed line: %q", i+1, line))
 			continue
 		}
-		links[slug] = target
+		links[slug] = Link{Target: target, Phone: phone, Auto: auto}
 	}
 	return links, warnings
 }

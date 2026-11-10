@@ -43,29 +43,22 @@ func (s *Store) All() (map[string]string, error) {
 }
 
 func (s *Store) Get(slug string) (string, bool, error) {
-	target, _, ok, err := s.Entry(slug)
-	return target, ok, err
+	l, ok, err := s.Lookup(slug)
+	return l.Target, ok, err
 }
 
-// Entry is Get plus whether sl-link made the link (it sits below autoMarker).
-func (s *Store) Entry(slug string) (target string, auto bool, ok bool, err error) {
-	links, err := s.All()
+// Lookup returns a link with its phone page and whether sl-link made it.
+func (s *Store) Lookup(slug string) (Link, bool, error) {
+	data, err := os.ReadFile(s.Path)
+	if os.IsNotExist(err) {
+		return Link{}, false, nil
+	}
 	if err != nil {
-		return "", false, false, err
+		return Link{}, false, err
 	}
-	target, ok = links[slug]
-	if !ok {
-		return "", false, false, nil
-	}
-	lines, err := s.readLines()
-	if err != nil {
-		return "", false, false, err
-	}
-	if m := markerIndex(lines); m >= 0 {
-		autoLinks, _ := ParseLinks(strings.Join(lines[m+1:], "\n"))
-		_, auto = autoLinks[slug]
-	}
-	return target, auto, true, nil
+	links, _ := parseEntries(string(data))
+	l, ok := links[slug]
+	return l, ok, nil
 }
 
 // Set adds or updates a hand-made link, preserving comments, blank lines,
@@ -88,9 +81,14 @@ func (s *Store) set(slug, target string, auto bool) error {
 	if err != nil {
 		return err
 	}
-	newLine := slug + " = " + target
+	newLine := formatLine(slug, target, "")
 	for i, line := range lines {
 		if lineSlug(line) == slug {
+			// Keep the phone page if the link still points at the same file.
+			_, raw, _ := strings.Cut(line, "=")
+			if old, phone := splitTarget(strings.TrimSpace(raw)); old == target {
+				newLine = formatLine(slug, target, phone)
+			}
 			lines[i] = newLine
 			return s.writeLines(lines)
 		}
@@ -164,6 +162,33 @@ func (s *Store) Ensure(target, home string) (slug string, created bool, err erro
 	return slug, true, nil
 }
 
+// SetPhone sets the page phones get for a file link instead of the file
+// (its SilverBullet page). An empty url removes it.
+func (s *Store) SetPhone(slug, url string) error {
+	if url != "" && !isWebURL(url) {
+		return fmt.Errorf("phone page must be an http(s) URL, got %q", url)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lines, err := s.readLines()
+	if err != nil {
+		return err
+	}
+	for i, line := range lines {
+		if lineSlug(line) != slug {
+			continue
+		}
+		_, raw, _ := strings.Cut(line, "=")
+		target, _ := splitTarget(strings.TrimSpace(raw))
+		if IsRedirect(target) {
+			return fmt.Errorf("%q redirects to a URL, so it has no phone page", slug)
+		}
+		lines[i] = formatLine(slug, target, url)
+		return s.writeLines(lines)
+	}
+	return fmt.Errorf("unknown slug %q", slug)
+}
+
 // PruneAuto removes sl-link links whose file or folder no longer exists and
 // returns their slugs. Hand-made links are never touched. With dryRun it
 // only reports what it would remove.
@@ -182,8 +207,8 @@ func (s *Store) PruneAuto(home string, dryRun bool) ([]string, error) {
 	kept := append([]string{}, lines[:m+1]...)
 	for _, line := range lines[m+1:] {
 		if slug := lineSlug(line); slug != "" {
-			_, target, _ := strings.Cut(line, "=")
-			target = strings.TrimSpace(target)
+			_, raw, _ := strings.Cut(line, "=")
+			target, _ := splitTarget(strings.TrimSpace(raw))
 			if target != "" && !IsRedirect(target) {
 				if _, err := os.Stat(ExpandPath(target, home)); os.IsNotExist(err) {
 					removed = append(removed, slug)
