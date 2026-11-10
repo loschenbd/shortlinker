@@ -149,8 +149,8 @@ func (s *Server) handleServe(w http.ResponseWriter, r *http.Request) {
 const sandboxPolicy = "sandbox allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-downloads"
 
 // sandboxWriter adds sandboxPolicy to responses whose type can run script
-// (HTML, SVG, XML). Other types are left alone: Chrome won't show a PDF
-// served with a sandbox policy.
+// (HTML, SVG, XML). Other types (PDFs, images, text) can't run script on
+// this origin, so they're left alone.
 type sandboxWriter struct {
 	http.ResponseWriter
 	wroteHeader bool

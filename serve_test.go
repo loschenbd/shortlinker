@@ -226,7 +226,7 @@ func TestServeSandboxesScriptablePagesUnlessLinkedByHand(t *testing.T) {
 		"/f/auto-html":       true,
 		"/f/auto-svg":        true,
 		"/f/noext":           true,  // sniffed as HTML
-		"/f/auto-pdf":        false, // Chrome won't show a sandboxed PDF
+		"/f/auto-pdf":        false, // can't run script here
 		"/f/site/saved.html": true,  // inside a folder link
 		"/f/site/":           true,  // the listing
 	} {

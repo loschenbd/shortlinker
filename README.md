@@ -151,8 +151,8 @@ The API does the same as `sl-link` when you leave out the slug:
   inside a folder link, are served with `Content-Security-Policy: sandbox`
   (scripts run, but in an opaque origin with no storage). A file linked by
   hand is trusted and keeps a normal origin, so pages that save settings in
-  `localStorage` still work. PDFs and images are never sandboxed (Chrome
-  won't show a sandboxed PDF).
+  `localStorage` still work. PDFs, images and text aren't sandboxed: they
+  can't run script on this origin.
 - `links.txt` is replaced atomically (temporary file, then rename), so a
   click during a save or a crash never sees half a file.
 
