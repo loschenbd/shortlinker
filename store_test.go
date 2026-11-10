@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -121,5 +124,184 @@ func TestStoreDelete(t *testing.T) {
 	}
 	if err := s.Delete("nope"); err == nil {
 		t.Error("Delete(nope) succeeded, want error")
+	}
+}
+
+func TestStoreEnsureNamesNewLinkAfterFile(t *testing.T) {
+	s := newTestStore(t, "budget = ~/Documents/budget.numbers\n")
+	slug, created, err := s.Ensure("~/Documents/quarterly-report-2.pdf", "/Users/test")
+	if err != nil || !created || slug != "quarterly-report-2-pdf" {
+		t.Fatalf("Ensure = %q, %v, %v", slug, created, err)
+	}
+	if target, ok, _ := s.Get(slug); !ok || target != "~/Documents/quarterly-report-2.pdf" {
+		t.Errorf("Get(%q) = %q, %v", slug, target, ok)
+	}
+}
+
+func TestStoreEnsureReusesExistingLinkForSamePath(t *testing.T) {
+	s := newTestStore(t, "budget = ~/Documents/budget.numbers\nmoney = /Users/test/Documents/budget.numbers\n")
+	for _, target := range []string{"~/Documents/budget.numbers", "/Users/test/Documents/./budget.numbers"} {
+		slug, created, err := s.Ensure(target, "/Users/test")
+		if err != nil || created || slug != "budget" {
+			t.Errorf("Ensure(%q) = %q, %v, %v; want budget, false", target, slug, created, err)
+		}
+	}
+	links, _ := s.All()
+	if len(links) != 2 {
+		t.Errorf("links = %v, want the 2 originals only", links)
+	}
+}
+
+func TestStoreEnsureAvoidsTakenAndReservedSlugs(t *testing.T) {
+	s := newTestStore(t, "notes-md = ~/a/notes.md\nb-notes-md = ~/c/b/notes.md\nnotes-md-2 = obsidian://x\n")
+	// Run in a fixed order: each new link takes a slug the next might want.
+	for _, c := range [][2]string{
+		{"~/b/notes.md", "notes-md-3"},
+		{"~/d/notes.md", "d-notes-md"},
+		{"/srv/api", "srv-api"},
+		{"/api", "api-2"},
+		{"~/e/TODO.md", "todo-md"},
+		{"~/f/TODO.md", "f-todo-md"},
+	} {
+		slug, _, err := s.Ensure(c[0], "/Users/test")
+		if err != nil || slug != c[1] {
+			t.Errorf("Ensure(%q) = %q, %v; want %q", c[0], slug, err, c[1])
+		}
+	}
+}
+
+func TestStoreEnsureRejectsURLsAndEmptyTargets(t *testing.T) {
+	s := newTestStore(t, "")
+	for _, target := range []string{"", "https://example.com"} {
+		if _, _, err := s.Ensure(target, "/Users/test"); err == nil {
+			t.Errorf("Ensure(%q): want an error", target)
+		}
+	}
+}
+
+func TestStoreConcurrentWritesKeepEveryLink(t *testing.T) {
+	s := newTestStore(t, "")
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, err := s.Ensure(fmt.Sprintf("~/f/file%d.md", i), "/Users/test"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if links, _ := s.All(); len(links) != 20 {
+		t.Errorf("got %d links, want 20", len(links))
+	}
+}
+
+func TestStoreEnsureStartsAutoSectionAndSetStaysAboveIt(t *testing.T) {
+	s := newTestStore(t, "# my links\nbudget = ~/b.numbers\n")
+	if _, _, err := s.Ensure("~/x/a.md", "/Users/test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Ensure("~/x/b.md", "/Users/test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("daily", "obsidian://daily"); err != nil {
+		t.Fatal(err)
+	}
+	want := "# my links\nbudget = ~/b.numbers\ndaily = obsidian://daily\n\n" + autoMarker + "\na-md = ~/x/a.md\nb-md = ~/x/b.md\n"
+	if got, _ := os.ReadFile(s.Path); string(got) != want {
+		t.Errorf("file =\n%s\nwant\n%s", got, want)
+	}
+	for slug, wantAuto := range map[string]bool{"budget": false, "daily": false, "a-md": true} {
+		if _, auto, ok, _ := s.Entry(slug); !ok || auto != wantAuto {
+			t.Errorf("Entry(%s): auto = %v, ok = %v; want auto = %v", slug, auto, ok, wantAuto)
+		}
+	}
+}
+
+func TestStorePruneAutoKeepsHandMadeAndLiveLinks(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "live.md")
+	if err := os.WriteFile(live, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	content := "hand = /nope/hand.md\n\n" + autoMarker + "\nlive = " + live + "\n# a note\ngone = /nope/gone.md\nurl = https://example.com\n"
+	s := newTestStore(t, content)
+	removed, err := s.PruneAuto("/Users/test", true)
+	if err != nil || strings.Join(removed, ",") != "gone" {
+		t.Fatalf("dry run = %v, %v", removed, err)
+	}
+	if got, _ := os.ReadFile(s.Path); string(got) != content {
+		t.Errorf("dry run changed the file")
+	}
+	if removed, err = s.PruneAuto("/Users/test", false); err != nil || strings.Join(removed, ",") != "gone" {
+		t.Fatalf("prune = %v, %v", removed, err)
+	}
+	want := strings.Replace(content, "gone = /nope/gone.md\n", "", 1)
+	if got, _ := os.ReadFile(s.Path); string(got) != want {
+		t.Errorf("file =\n%s\nwant\n%s", got, want)
+	}
+	if removed, _ := newTestStore(t, "hand = /nope/x\n").PruneAuto("/Users/test", false); len(removed) != 0 {
+		t.Errorf("no sl-link section: removed %v", removed)
+	}
+}
+
+func TestStoreWriteFollowsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "dotfiles", "links.txt")
+	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(real, []byte("a = ~/a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "links.txt")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	s := &Store{Path: link}
+	if err := s.Set("b", "~/b"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("links.txt is no longer a symlink")
+	}
+	if got, _ := os.ReadFile(real); string(got) != "a = ~/a\nb = ~/b\n" {
+		t.Errorf("real file = %q", got)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, "dotfiles", ".links-*")); len(leftovers) != 0 {
+		t.Errorf("temp files left behind: %v", leftovers)
+	}
+}
+
+func TestStoreReadersNeverSeeHalfAFile(t *testing.T) {
+	var b strings.Builder
+	for i := range 3000 {
+		fmt.Fprintf(&b, "link-%d = ~/Documents/some/long/path/to/file-%d.md\n", i, i)
+	}
+	s := newTestStore(t, b.String())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 40 {
+			if err := s.Set(fmt.Sprintf("link-%d", i), fmt.Sprintf("~/moved/%d.md", i)); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	for reads := 0; ; reads++ {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		links, err := s.All()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(links) != 3000 {
+			t.Fatalf("read %d: saw %d links mid-save, want 3000", reads, len(links))
+		}
 	}
 }

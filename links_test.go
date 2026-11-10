@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseLinks(t *testing.T) {
 	content := `
@@ -39,6 +42,7 @@ func TestValidSlug(t *testing.T) {
 		"UPPER":     false,
 		"has space": false,
 		"o":         false, // reserved
+		"f":         false, // reserved
 		"api":       false, // reserved
 	}
 	for slug, want := range cases {
@@ -50,10 +54,10 @@ func TestValidSlug(t *testing.T) {
 
 func TestIsRedirect(t *testing.T) {
 	cases := map[string]bool{
-		"obsidian://daily?vault=Main":  true,
-		"https://example.com/x":        true,
-		"~/Documents/budget.numbers":   false,
-		"/Users/alex/Desktop":          false,
+		"obsidian://daily?vault=Main": true,
+		"https://example.com/x":       true,
+		"~/Documents/budget.numbers":  false,
+		"/Users/alex/Desktop":         false,
 	}
 	for target, want := range cases {
 		if got := IsRedirect(target); got != want {
@@ -72,6 +76,24 @@ func TestExpandPath(t *testing.T) {
 	for _, c := range cases {
 		if got := ExpandPath(c.in, "/Users/test"); got != c.want {
 			t.Errorf("ExpandPath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestSlugFromPath(t *testing.T) {
+	for in, want := range map[string]string{
+		"/Users/me/Documents/quarterly-report-2.pdf": "quarterly-report-2-pdf",
+		"~/Notes/Q3 Plan (v2).md":                    "q3-plan-v2-md",
+		"/Users/me/Code/my-app":                      "my-app",
+		"/Users/me/.config":                          "config",
+		"/Users/me/Café.md":                          "caf-md",
+		"/":                                          "file",
+		"/x/日本":                                      "file",
+		"/x/" + strings.Repeat("a", 80) + ".md":      strings.Repeat("a", 60),
+		"/x/" + strings.Repeat("a", 59) + " b.md":    strings.Repeat("a", 59),
+	} {
+		if got := SlugFromPath(in); got != want {
+			t.Errorf("SlugFromPath(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

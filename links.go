@@ -9,11 +9,30 @@ import (
 
 var slugRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
+var nonSlugRun = regexp.MustCompile(`[^a-z0-9]+`)
+
+// maxAutoSlug keeps picked slugs readable in a link's address.
+const maxAutoSlug = 60
+
 // reservedSlugs collide with routes and can never be registered.
-var reservedSlugs = map[string]bool{"o": true, "api": true}
+var reservedSlugs = map[string]bool{"o": true, "f": true, "api": true}
 
 func ValidSlug(s string) bool {
 	return slugRe.MatchString(s) && !reservedSlugs[s]
+}
+
+// SlugFromPath names a file or folder's link after its base name, extension
+// included: "Q3 Plan (v2).md" gives "q3-plan-v2-md". The result can still be
+// taken or reserved; Store.Ensure adds -2, -3, ... until it's free.
+func SlugFromPath(p string) string {
+	s := strings.Trim(nonSlugRun.ReplaceAllString(strings.ToLower(filepath.Base(p)), "-"), "-")
+	if len(s) > maxAutoSlug {
+		s = strings.TrimRight(s[:maxAutoSlug], "-")
+	}
+	if s == "" {
+		return "file"
+	}
+	return s
 }
 
 // IsRedirect reports whether target is served as a 302 redirect (anything

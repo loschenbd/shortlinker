@@ -10,6 +10,8 @@ LOG="$HOME/Library/Logs/shortlinker.log"
 
 mkdir -p "$BIN_DIR" "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 go build -o "$BIN_DIR/shortlinker" .
+# `sl-link <path>` prints a link for a file or folder (same binary).
+ln -sf shortlinker "$BIN_DIR/sl-link"
 
 HUB_ARGS=""
 if [ -n "${HUB:-}" ]; then
@@ -41,4 +43,5 @@ else
   echo "Installed as hub. Logs: ${LOG}"
   echo "One-time tailnet exposure: tailscale serve --bg --https=443 http://127.0.0.1:7777"
   echo "(That replaces whatever this Mac already serves at / on port 443.)"
+  echo "Never publish port 7778: it opens files on this Mac and changes links."
 fi
