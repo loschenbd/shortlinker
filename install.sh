@@ -39,5 +39,6 @@ if [ -n "${HUB:-}" ]; then
   echo "Installed as opener agent (hub: ${HUB}). Logs: ${LOG}"
 else
   echo "Installed as hub. Logs: ${LOG}"
-  echo "One-time tailnet exposure: tailscale serve --bg 7777"
+  echo "One-time tailnet exposure: tailscale serve --bg --https=443 http://127.0.0.1:7777"
+  echo "(That replaces whatever this Mac already serves at / on port 443.)"
 fi

@@ -12,7 +12,9 @@ Design: `docs/superpowers/specs/2026-07-06-shortlinker-design.md`
 **Hub (the designated, usually-awake Mac):**
 
     make install
-    tailscale serve --bg 7777        # one-time; publishes https://<hub>.<tailnet>.ts.net
+    # One-time: publish the hub at https://<hub>.<tailnet>.ts.net.
+    # This replaces whatever this Mac already serves at / on port 443.
+    tailscale serve --bg --https=443 http://127.0.0.1:7777
 
 Recommended: System Settings → Battery/Energy → prevent sleep when plugged in.
 Every link requires the hub to be awake.
