@@ -56,10 +56,10 @@ Slugs: lowercase letters, digits, hyphens. `o`, `f` and `api` are reserved.
 
 Prints one link per file or folder, registering it if it's new. Run it on the
 hub Mac. The slug is the file's name (`report-pdf`); when that's taken it
-tries the folder plus the name (`documents-report-pdf`), then `-2`, `-3`. Linking the
-same path again prints the same link. The link works everywhere: Ghostty and
-Moshi Desktop open the file on the Mac (where a `file://` link is dead in
-Moshi Desktop's chat view), and a phone shows it.
+tries the folder plus the name (`documents-report-pdf`), then `-2`, `-3`.
+Linking the same path again prints the same link. The link works everywhere:
+Ghostty and Moshi Desktop open the file on the Mac (where a `file://` link is
+dead in Moshi Desktop's chat view), and a phone shows it.
 
 - Exit codes: 0 ok, 1 error, 2 no such path, 4 hub unreachable.
 - The address it prints comes from `SHORTLINKER_URL`, else
@@ -73,8 +73,8 @@ Moshi Desktop's chat view), and a phone shows it.
   Mac that shows the file in Finder instead of opening it; a phone treats it
   like the plain link. Use it for file names mentioned in passing.
 
-**Markdown on a phone.** For a `.md` file in a SilverBullet space, sl-link also
-runs `sb-link` once and saves the file's SilverBullet page with the link:
+**Markdown on a phone.** For a `.md` file in a SilverBullet space, sl-link
+also runs `sb-link` once and saves the file's SilverBullet page with the link:
 
     notes-md = ~/Documents/notes.md | https://<hub>.<tailnet>.ts.net:3000/notes
 
