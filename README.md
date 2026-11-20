@@ -331,3 +331,7 @@ for 30 days, and your links get their clicks from `clicks.jsonl`.
 - `sl-link` exits 4: the hub isn't running on this Mac; check the log.
 - "no hub token": run the command on the hub Mac; the hub writes the token
   when it starts.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
