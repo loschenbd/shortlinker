@@ -42,6 +42,8 @@ type Server struct {
 	reveal    func(target string) error // shows a target in Finder instead of opening it
 	client    *http.Client              // for agent→hub resolve calls
 	devices   *devices                  // tailnet device names and this Mac's own; nil until known
+	phoneCmd  string                    // makes Markdown files' phone pages (see phone.go)
+	phoneMu   sync.Mutex                // one phone-page run at a time
 
 	refusedMu sync.Mutex
 	refused   map[string]bool // Hosts the public port refused, logged once each
@@ -57,6 +59,7 @@ func NewServer(store *Store, hubURL, localPort, home string) *Server {
 		open:      func(target string) error { return runOpen(target) },
 		reveal:    func(target string) error { return runOpen("-R", target) },
 		client:    &http.Client{Timeout: 3 * time.Second},
+		phoneCmd:  defaultPhoneCmd(),
 	}
 }
 
@@ -88,6 +91,7 @@ func (s *Server) LocalHandler() http.Handler {
 		mux.HandleFunc("POST /api/links", s.requireAuth(s.handleSetLink))
 		mux.HandleFunc("DELETE /api/links/{slug}", s.requireAuth(s.handleDeleteLink))
 		mux.HandleFunc("POST /api/links/{slug}/phone", s.requireAuth(s.handleSetPhone))
+		mux.HandleFunc("POST /api/links/{slug}/phone-page", s.requireAuth(s.handlePhonePage))
 		mux.HandleFunc("POST /api/links/{slug}/rename", s.requireAuth(s.handleRename))
 		mux.HandleFunc("POST /api/links/{slug}/archive", s.requireAuth(s.handleArchive))
 		mux.HandleFunc("POST /api/links/{slug}/note", s.requireAuth(s.handleSetNote))

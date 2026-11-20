@@ -44,10 +44,11 @@ Linking the same path again gives the same link. Run it on the hub Mac.
 The link records which agent session made it, from SHORTLINKER_SESSION or
 Claude Code's CLAUDE_CODE_SESSION_ID, so the manage page can lead back to it.
 
-A Markdown file can get a page phones open instead of plain text: sl-link
-runs the command in SHORTLINKER_PHONE_CMD (default sb-link, a SilverBullet
-linker) once and saves the URL it prints. Without that command, nothing
-changes.
+A Markdown or code file can get a page phones open instead of plain text,
+where it can be edited: sl-link asks the hub to run sb-link (a SilverBullet
+linker) once, and the hub saves the URL it prints. The hub runs it because
+sb-link needs the login Keychain, which a session started over SSH can't
+use. Without sb-link, nothing changes.
 
 Exit codes: 0 ok; 1 other error; 2 no such file or folder; 4 hub unreachable.
 The hub's address comes from SHORTLINKER_URL, else ~/.config/shortlinker/url,
@@ -71,14 +72,13 @@ type linker func(target string) (slug, phone string, err error)
 // linkOptions are what linkPaths needs; tests swap in fakes.
 type linkOptions struct {
 	home, hubURL string
-	finder       bool   // add ?finder: a Mac shows the file in Finder
-	markdown     bool   // print [name](link)
-	phoneLabel   string // what the notes call a phone page ("SilverBullet page" for sb-link)
+	finder       bool // add ?finder: a Mac shows the file in Finder
+	markdown     bool // print [name](link)
 	register     linker
-	// phonePage finds the page phones should get for a Markdown file (its
-	// SilverBullet page); "" with no error means there isn't one.
-	phonePage func(abs string) (string, error)
-	savePhone func(slug, url string) error
+	// phonePage asks the hub to make and save the page phones should get
+	// for a Markdown link (its SilverBullet page). The reply says why
+	// there's none; an empty reply means no page and nothing to say.
+	phonePage func(slug string) (phonePageReply, error)
 }
 
 // api talks to the hub's local API with its token. Before the first
@@ -262,9 +262,9 @@ func runLink(args []string) int {
 	}
 	o.home, o.hubURL = home, hubURL
 	o.register = func(target string) (string, string, error) { return postLink(hub, target, meta) }
-	o.phonePage = phonePageFor(phoneCommand())
-	o.phoneLabel = phonePageLabel(phoneCommand())
-	o.savePhone = func(slug, url string) error { return postPhone(hub, slug, url) }
+	slow := hub // sb-link can take several seconds
+	slow.client = &http.Client{Timeout: phonePageTimeout + 15*time.Second}
+	o.phonePage = func(slug string) (phonePageReply, error) { return postPhonePage(slow, slug) }
 
 	var out, errOut bytes.Buffer
 	code := linkPaths(paths, o, &out, &errOut)
@@ -316,18 +316,18 @@ func linkPaths(paths []string, o linkOptions, out, errOut io.Writer) int {
 			}
 			continue
 		}
-		if phone == "" && !info.IsDir() && strings.EqualFold(filepath.Ext(abs), ".md") && o.phonePage != nil {
-			label := o.phoneLabel
-			if label == "" {
-				label = phonePageLabel("sb-link")
-			}
+		if phone == "" && !info.IsDir() && getsPhonePage(abs) && o.phonePage != nil {
 			// The link works either way; without a page, phones get plain text.
-			if url, err := o.phonePage(abs); err != nil {
-				fmt.Fprintf(errOut, "sl-link: %s: no %s, so phones get plain text: %v\n", p, label, err)
-			} else if url != "" {
-				if err := o.savePhone(slug, url); err != nil {
-					fmt.Fprintf(errOut, "sl-link: %s: couldn't save its %s: %v\n", p, label, err)
+			reply, err := o.phonePage(slug)
+			if err == nil && reply.Reason != "" {
+				err = errors.New(reply.Reason)
+			}
+			if err != nil {
+				label := reply.Label
+				if label == "" {
+					label = "phone page"
 				}
+				fmt.Fprintf(errOut, "sl-link: %s: no %s, so phones get plain text: %v\n", p, label, err)
 			}
 		}
 		link := strings.TrimRight(o.hubURL, "/") + "/" + slug
@@ -340,61 +340,6 @@ func linkPaths(paths []string, o linkOptions, out, errOut io.Writer) int {
 		fmt.Fprintln(out, link)
 	}
 	return code
-}
-
-// phoneCommand is the command that finds a Markdown file's phone page.
-func phoneCommand() string {
-	if c := os.Getenv("SHORTLINKER_PHONE_CMD"); c != "" {
-		return c
-	}
-	return "sb-link"
-}
-
-// phonePageLabel names a command's pages in sl-link's notes. sb-link's
-// keep the words people and agents already watch for.
-func phonePageLabel(command string) string {
-	if filepath.Base(command) == "sb-link" {
-		return "SilverBullet page"
-	}
-	return "phone page"
-}
-
-// phonePageFor runs a phone-page command on a Markdown file and returns the
-// URL it prints last. The contract (sb-link's): exit 0 and print a URL when
-// there's a page; exit non-zero with the reason on stderr when there isn't.
-// Only exit 0 counts: sb-link's exit 4 prints a URL too, but SilverBullet
-// was down, so the page may not exist yet. The command can take several
-// seconds, which is why the page is saved with the link rather than looked
-// up on every tap. With no such command on this Mac there's no page and
-// nothing to say.
-func phonePageFor(command string) func(abs string) (string, error) {
-	return func(abs string) (string, error) {
-		bin, err := exec.LookPath(command)
-		if err != nil {
-			return "", nil
-		}
-		name := filepath.Base(command)
-		var stderr bytes.Buffer
-		cmd := exec.Command(bin, abs)
-		cmd.Stderr = &stderr
-		stdout, err := cmd.Output()
-		if err != nil {
-			reason := commandReason(name, stderr.String())
-			var exit *exec.ExitError
-			if errors.As(err, &exit) && exit.ExitCode() == 2 && reason != "" {
-				return "", fmt.Errorf("%s: %s", name, reason)
-			}
-			if reason == "" {
-				return "", fmt.Errorf("%s: %v", name, err)
-			}
-			return "", fmt.Errorf("%s (%v): %s", name, err, reason)
-		}
-		lines := strings.Fields(strings.TrimSpace(string(stdout)))
-		if len(lines) == 0 || !isWebURL(lines[len(lines)-1]) {
-			return "", fmt.Errorf("%s printed no URL", name)
-		}
-		return lines[len(lines)-1], nil
-	}
 }
 
 // commandReason turns a command's stderr ("name: <reason>" lines) into one
@@ -464,10 +409,6 @@ func agentSession() string {
 		return s
 	}
 	return os.Getenv("CLAUDE_CODE_SESSION_ID")
-}
-
-func postPhone(a api, slug, url string) error {
-	return a.do(http.MethodPost, "/api/links/"+slug+"/phone", map[string]string{"url": url}, nil)
 }
 
 // savedHubURL is the hub's address if it's known without asking tailscale:
