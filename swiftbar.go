@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // The SwiftBar menu. `shortlinker swiftbar` prints it in SwiftBar's plugin
@@ -26,15 +28,14 @@ import (
 const recentCount = 8
 
 type menuInput struct {
-	nested    bool
-	bin       string // this binary, which the menu's actions run
-	state     string // "up", "down", "not-hub" or "error"
-	err       string
-	links     []linkDetails
-	linksPath string
-	logPath   string
-	label     string // the LaunchAgent's label
-	uid       int
+	nested  bool
+	bin     string // this binary, which the menu's actions run
+	state   string // "up", "down", "not-hub" or "error"
+	err     string
+	links   []linkDetails
+	logPath string
+	label   string // the LaunchAgent's label
+	uid     int
 }
 
 func runSwiftbar(args []string, out io.Writer) int {
@@ -46,7 +47,6 @@ func runSwiftbar(args []string, out io.Writer) int {
 	}
 	home, _ := os.UserHomeDir()
 	m.bin, _ = os.Executable()
-	m.linksPath = filepath.Join(configDir(home), "links.txt")
 	m.logPath = filepath.Join(home, "Library", "Logs", "shortlinker.log")
 	name := "user"
 	if u, err := user.Current(); err == nil {
@@ -67,6 +67,8 @@ func runSwiftbar(args []string, out io.Writer) int {
 		m.state = "down"
 	case errors.Is(err, errNoToken), errors.Is(err, errNoAPI):
 		m.state = "not-hub"
+	case errors.Is(err, errNotHub):
+		m.state, m.err = "error", "Something else is on shortlinker's port"
 	default:
 		m.state, m.err = "error", err.Error()
 	}
@@ -104,27 +106,39 @@ func renderMenu(m menuInput) string {
 }
 
 func renderLinks(m menuInput, line func(string)) {
-	yours, auto, missing := 0, 0, 0
+	kept, missing := 0, 0
 	for _, d := range m.links {
-		if d.Source == "sl-link" {
-			auto++
-			if d.Kind == "missing" {
-				missing++
-			}
-		} else {
-			yours++
+		switch {
+		case d.Kept:
+			kept++
+		case d.Kind == "missing":
+			missing++ // what prune would remove
 		}
 	}
-	line(fmt.Sprintf("%s · %d yours · %d from sl-link", plural(len(m.links), "link"), yours, auto))
+	line(fmt.Sprintf("%s · %d kept", plural(len(m.links), "link"), kept))
 	line("---")
 	line(menuAction("Link Finder selection", "link.badge.plus", false, m.bin, "menu", "link", "--selection", "--copy", "--notify"))
-	line(menuAction("Find links…", "magnifyingglass", false, m.bin, "manage"))
+	line(menuAction("Manage links…", "list.bullet.rectangle", false, m.bin, "manage"))
 
+	// Recently linked: what sl-link printed most recently, newest first.
 	var recent []linkDetails
-	for i := len(m.links) - 1; i >= 0 && len(recent) < recentCount; i-- {
-		if d := m.links[i]; d.Source == "sl-link" && d.Kind != "missing" {
+	for _, d := range m.links {
+		if d.Linked > 0 && d.Kind != "missing" && d.Kind != "url" {
 			recent = append(recent, d)
 		}
+	}
+	lastLinked := func(d linkDetails) time.Time {
+		if d.LastLinked != nil {
+			return *d.LastLinked
+		}
+		if d.Created != nil {
+			return *d.Created
+		}
+		return time.Time{}
+	}
+	sort.SliceStable(recent, func(i, j int) bool { return lastLinked(recent[i]).After(lastLinked(recent[j])) })
+	if len(recent) > recentCount {
+		recent = recent[:recentCount]
 	}
 	// Every row below is always there, so the menu keeps its shape: SwiftBar 2.1.0 and 2.1.1
 	// stop updating a submenu once its number of rows changes, until SwiftBar is relaunched,
@@ -155,7 +169,6 @@ func renderLinks(m menuInput, line func(string)) {
 	} else {
 		line("No dead links | sfimage=trash")
 	}
-	line(menuAction("Edit links.txt", "square.and.pencil", false, "/usr/bin/open", "-t", m.linksPath))
 }
 
 // menuAction is a row that runs argv when clicked.
@@ -174,9 +187,18 @@ func menuAction(title, sfimage string, refresh bool, argv ...string) string {
 }
 
 // menuTitle keeps a title from breaking the line format: "|" starts the
-// parameters and leading dashes would make it a submenu row.
+// parameters, a line break would start a row of its own, and leading
+// dashes would make it a submenu row.
 func menuTitle(s string) string {
-	s = strings.NewReplacer("|", "¦", "\n", " ", "\r", " ").Replace(s)
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r == '|':
+			return '¦'
+		case unicode.IsControl(r):
+			return ' '
+		}
+		return r
+	}, s)
 	return strings.TrimLeft(s, "-")
 }
 

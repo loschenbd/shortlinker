@@ -52,21 +52,22 @@ func ExpandPath(target, home string) string {
 	return target
 }
 
-// Link is one link: a line of links.txt or of sl-link's file.
+// Link is where a slug goes.
 type Link struct {
 	Target string // a URL to redirect to, or a file/folder path
 	Phone  string // optional page phones get instead of the file (a SilverBullet page)
-	Auto   bool   // made by sl-link: it lives in sl-link's file, not links.txt
 }
 
-// Entry is a link with its slug, and for sl-link's links, their record.
+// Entry is a link with its slug and, from the store, its record.
 type Entry struct {
 	Slug string
 	Link
-	Rec *Record // a copy of sl-link's record; nil for your links
+	Rec *Record // a copy of the store's record; nil for a line parsed from text
 }
 
-// phoneSep separates a target from its phone page:
+// The text format, which `shortlinker export` writes and `import` reads
+// (and links.txt used to hold). phoneSep separates a target from its phone
+// page:
 //
 //	notes-md = ~/Documents/notes.md | https://hub.ts.net:3000/notes
 const phoneSep = " | "

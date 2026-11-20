@@ -19,7 +19,7 @@ func TestListPrintsMatchingLinks(t *testing.T) {
 		t.Fatalf("ls: code %d", code)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 3 || !strings.HasPrefix(lines[0], "budget ") || !strings.HasSuffix(lines[2], "sl-link missing") {
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "budget ") || !strings.Contains(lines[0], " kept") || !strings.HasSuffix(lines[2], " missing") {
 		t.Errorf("ls =\n%s", out.String())
 	}
 	out.Reset()

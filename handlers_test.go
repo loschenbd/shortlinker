@@ -78,7 +78,7 @@ func send(srv *Server, method, url, body string, headers ...string) *httptest.Re
 func route(srv *Server, req *http.Request) http.Handler {
 	p := req.URL.Path
 	if strings.HasPrefix(p, "/o/") || strings.HasPrefix(p, "/api/links") || p == "/manage" ||
-		p == "/api/prune" || p == "/api/manage-code" || p == "/api/session" || p == "/api/stats" {
+		p == "/api/prune" || p == "/api/manage-code" || p == "/api/session" || p == "/api/stats" || p == "/api/hub-proof" {
 		return srv.LocalHandler()
 	}
 	return srv.PublicHandler()
@@ -331,6 +331,14 @@ func TestPublicPortHasNoLocalRoutes(t *testing.T) {
 		{"POST", "http://localhost:7777/api/links", `{"target":"/etc/hosts"}`},
 		{"DELETE", "http://localhost:7777/api/links/budget", ""},
 		{"POST", "http://localhost:7777/api/prune", `{}`},
+		{"POST", "http://localhost:7777/api/links/budget/keep", `{"kept":false}`},
+		{"POST", "http://localhost:7777/api/links/budget/note", `{"note":"x"}`},
+		{"POST", "http://localhost:7777/api/links/budget/archive", `{"archived":true}`},
+		{"GET", "http://localhost:7777/api/links/budget/clicks", ""},
+		{"GET", "http://localhost:7777/api/stats", ""},
+		{"GET", "http://localhost:7777/api/hub-proof?n=" + strings.Repeat("a", 32), ""},
+		{"POST", "http://localhost:7777/api/manage-code", `{}`},
+		{"GET", "http://localhost:7777/manage", ""},
 	} {
 		req := httptest.NewRequest(c.method, c.url, strings.NewReader(c.body))
 		req.Header.Set("Content-Type", "application/json")
@@ -515,10 +523,10 @@ func TestManagePageSignsInWithAOneTimeCode(t *testing.T) {
 		t.Errorf("CSP = %q", csp)
 	}
 
-	var code struct{ Code, URL string }
+	var code struct{ Code string }
 	json.Unmarshal(send(srv, "POST", "http://127.0.0.1:7778/api/manage-code", "{}").Body.Bytes(), &code)
-	if code.Code == "" || code.URL != "http://localhost:7778/manage#code="+code.Code {
-		t.Fatalf("code = %+v", code)
+	if page, err := managePageURL("http://127.0.0.1:7778", code.Code); err != nil || page != "http://localhost:7778/manage#code="+code.Code {
+		t.Fatalf("code = %+v: %q, %v", code, page, err)
 	}
 	trade := func(c string) *httptest.ResponseRecorder {
 		return send(srv, "POST", "http://localhost:7778/api/session", `{"code":"`+c+`"}`, "Authorization", "", "Sec-Fetch-Site", "same-origin")
@@ -557,9 +565,9 @@ func TestAPIListDetails(t *testing.T) {
 	}
 	var got []string
 	for _, d := range l.Links {
-		got = append(got, d.Slug+":"+d.Source+":"+d.Kind+":"+d.Phone)
+		got = append(got, fmt.Sprintf("%s:%v:%s:%s", d.Slug, d.Kept, d.Kind, d.Phone))
 	}
-	want := "web:yours:url:,folder:yours:folder:,a-md:sl-link:file:https://sb/a,gone-md:sl-link:missing:"
+	want := "web:true:url:,folder:true:folder:,a-md:false:file:https://sb/a,gone-md:false:missing:"
 	if l.Hub != "https://hub.example.ts.net" || strings.Join(got, ",") != want {
 		t.Errorf("hub = %q, links = %v\nwant %s", l.Hub, got, want)
 	}

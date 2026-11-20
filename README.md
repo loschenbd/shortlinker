@@ -35,31 +35,38 @@ An agent listens only on 7778, to open files on its own Mac.
 
 See [Menu bar](#menu-bar).
 
-## Your links and sl-link's
+## Links
 
-Links live in two files in `~/.config/shortlinker/`:
+Every link is a record in `~/.config/shortlinker/links.jsonl`: its slug,
+its target, and what shortlinker knows about it. That covers when it was
+made, by which agent session, in which project, a note, and how often it's
+been clicked. A target with `://` is a redirect (`https://…`,
+`obsidian://daily?vault=Main`); anything else is a file or folder path.
+Slugs are lowercase letters, digits and hyphens; `o`, `f` and `api` are
+reserved.
 
-- **`links.txt`** is yours, in plain text. Edit it by hand; changes take
-  effect immediately, no restart.
-- **`auto-links.jsonl`** is sl-link's (below): one record per link, with
-  when it was made, by which agent session, in which project, and how often
-  it's been clicked. shortlinker writes it; don't edit it while the hub runs.
+**Kept links** are the ones you mean to keep: links you named yourself, and
+any you mark with **Keep forever** in the manage page or `shortlinker keep`.
+They never archive, and `prune` leaves them alone. Every other link is one
+sl-link made, which archives when nobody uses it (see
+[What shortlinker records](#what-shortlinker-records)).
+
+You manage links with the [manage page](#manage-page), the
+[commands](#commands) or the [API](#api), not by editing the file. The hub
+re-reads it if it changes on disk, and the format is one JSON object per
+line, but the hub writes it too. For a file you can edit, keep in git, or
+move to another Mac, use the text format:
+
+    shortlinker export > links.txt    # slug = target | phone page, notes as comments
+    shortlinker import links.txt      # adds them as kept links
 
 ```
-# slug = target      (:// → redirect, otherwise a file or folder path)
+# slug = target | phone page (optional)
 budget = ~/Documents/Finance/2026-budget.numbers
 daily  = obsidian://daily?vault=Main
+# A comment right above a link is its note.
 proj   = ~/Code/my-app
 ```
-
-Slugs are lowercase letters, digits and hyphens; `o`, `f` and `api` are
-reserved. A slug can only be used once across both files; if the same slug
-is in both, yours wins.
-
-Which file a link is in matters: sl-link's links are served sandboxed (see
-[Security model](#security-model)), archive when nobody uses them, and
-`shortlinker prune` can remove them. Naming a link yourself, through the API
-or the manage page, moves it to `links.txt`, where it stays for good.
 
 ## A link for any file: `sl-link`
 
@@ -113,36 +120,43 @@ All run on the hub Mac.
 
     shortlinker ls [words...]     # list links, or those matching every word
     shortlinker ls --unclicked --older 14 --project my-app
+    shortlinker ls --kept         # only kept links
     shortlinker ls --archived     # include archived links (--removed: tombstones)
+    shortlinker keep <slug>...    # keep links (unkeep: stop keeping them)
+    shortlinker note <slug> text  # set a link's note (--clear removes it)
     shortlinker rm <slug>...      # delete links
-    shortlinker mv <old> <new>    # rename (the old address sends clicks on)
-    shortlinker archive <slug>... # hide sl-link links from the lists
+    shortlinker mv <old> <new>    # rename and keep (the old address sends clicks on)
+    shortlinker archive <slug>... # hide links from the lists
     shortlinker restore <slug>... # bring them back
     shortlinker copy <slug>       # copy a link (--markdown for [name](link))
     shortlinker manage            # open the manage page
-    shortlinker prune -n          # list sl-link's links whose file is gone
+    shortlinker prune -n          # list links that aren't kept whose file is gone
     shortlinker prune             # remove them
+    shortlinker export            # every link in the text format
+    shortlinker import [file]     # add links from that format, kept
 
-`prune` only touches sl-link's links. A removed link's slug is never given to
+`prune` never touches kept links. A removed link's slug is never given to
 another file: an old link shows "This link was removed", never someone
 else's file. Linking the same file again brings its old link back.
 
 ## What shortlinker records
 
-For each sl-link link: when it was made, how (`sl-link`, `finder`, `api` or
-`manage`), the git project its file is in (the main checkout, even for a file
-in a worktree), the agent session that made it, an optional note, how many
-times it's been linked, and its clicks.
+For each link: when it was made, how (`sl-link`, `finder`, `api`, `manage`
+or `import`), the git project its file is in (the main checkout, even for a
+file in a worktree), the agent session that made it, an optional note, how
+many times sl-link printed it, its clicks, and the device of the last one.
 
 Each click on a short link goes in `clicks.jsonl`: the time, the slug, which
 tailnet device clicked (Tailscale names it), whether it was a Mac or a phone,
 what the click did, and the referring site's origin (`https://www.notion.so`,
-never the full URL). Clicks on your own links are logged too.
+never the full URL). Only slugs that could exist are logged, and the log
+moves to `clicks.jsonl.1` at 10 MB, replacing the one before, so a flood of
+requests can't fill the disk.
 
-**Archiving.** An sl-link link nobody clicks within 30 days of being made, or
-that goes 180 days without a click, is archived: it's hidden from `ls`, the
-manage page and the menu, but it still works, and a click or linking the file
-again brings it back. Your links never archive. The hub checks once an hour.
+**Archiving.** A link that isn't kept and that nobody clicks within 30 days
+of being made, or that goes 180 days without a click, is archived: it's
+hidden from `ls`, the manage page and the menu, but it still works, and a
+click or linking the file again brings it back. The hub checks once an hour.
 
 DuckDB reads both files directly, for questions like how many links get
 clicked at all:
@@ -154,9 +168,12 @@ for what's recorded and why, and what deliberately isn't.
 
 ## Manage page
 
-`shortlinker manage` (or **Find links…** in the menu) opens a page on the
-hub to search, copy, open, rename, edit and delete links. Type to filter;
-Enter copies the first match. It works only on the hub Mac, in that browser,
+`shortlinker manage` (or **Manage links…** in the menu) opens a page on the
+hub with every link and its record: filter by kept, never clicked, archived,
+missing or removed, search, sort, and see each link's clicks, project, note
+and the session that made it (with a `claude --resume` command to copy).
+From there you can keep, archive, restore, rename, edit, note and delete
+links, and prune dead ones. It works only on the hub Mac, in that browser,
 for 12 hours; open it again from the menu or the command after that.
 
 ## Menu bar
@@ -165,11 +182,10 @@ for 12 hours; open it again from the menu or the command after that.
 
 - **Link Finder selection**: links what's selected in Finder and copies the
   link. The first time, macOS asks to let SwiftBar control Finder.
-- **Find links…**: the manage page.
-- **Recently linked**: the last few sl-link links; click to copy, hold Option
+- **Manage links…**: the manage page.
+- **Recently linked**: what sl-link linked last; click to copy, hold Option
   to copy as Markdown.
-- **Prune N dead links**, when there are any; **Edit links.txt**; restart and
-  log.
+- **Prune N dead links**, when there are any; restart and log.
 
 The plugin is two lines around `shortlinker swiftbar`. To show the menu inside
 another plugin instead of as its own icon, run `shortlinker swiftbar --nested`
@@ -191,12 +207,15 @@ token, which the hub writes to `~/.config/shortlinker/token` on first start:
     # {"created":true,"phone":"","slug":"report-pdf","target":"~/Documents/report.pdf"}
     curl -X DELETE -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7778/api/links/budget
 
-Leaving out the slug, as in the second POST, does what sl-link does; it also
-takes `origin`, `session` and `note`. Also:
+A POST with a slug makes or replaces a kept link (it also takes `phone`).
+Leaving out the slug, as in the second POST, does what sl-link does. Both
+take `origin`, `session` and `note`. Also:
 
 - `GET /api/links?details=1&archived=1&removed=1`: every link with its record
 - `GET /api/links/<slug>/clicks`: a link's clicks, newest first
 - `GET /api/stats`: counts, and the last 30 days of clicks by device and site
+- `POST /api/links/<slug>/keep {"kept": true}` (or `false` to stop keeping it)
+- `POST /api/links/<slug>/note {"note": "..."}`
 - `POST /api/links/<slug>/archive {"archived": true}` (or `false` to restore)
 - `POST /api/links/<slug>/rename {"to": "new"}`
 - `POST /api/links/<slug>/phone {"url": "..."}`
@@ -237,9 +256,14 @@ Delete the token file and restart the hub to change the token.
 - **The token.** Because other accounts and processes on the hub can reach
   7778, the link API needs the token in `~/.config/shortlinker/token`
   (readable by you only). Without it, anything on the Mac could register a
-  path (say `~/.ssh/id_ed25519`) and read it back through `/f/`. The manage
-  page never sees the token: `shortlinker manage` trades it for a one-time
-  code, and the page trades that for a session that expires in 12 hours.
+  path (say `~/.ssh/id_ed25519`) and read it back through `/f/`. Before
+  sending it, every command checks that what answers on 7778 knows the token
+  (an HMAC of a fresh nonce), so another account's server on that port while
+  the hub is down gets nothing. The manage page never sees the token:
+  `shortlinker manage` trades it for a one-time code, and the page trades
+  that for a session that expires in 12 hours. The code reaches the browser
+  through `osascript` on stdin, never as an argument, since every account
+  can read every process's arguments.
 - **Web pages.** 7778 refuses any Host but `localhost` and `127.0.0.1` (DNS
   rebinding), and its API refuses requests from other sites' pages (a
   `Sec-Fetch-Site` of `cross-site` or `same-site`) and bodies that aren't
@@ -249,41 +273,55 @@ Delete the token file and restart the hub to change the token.
 - **Opening.** `open` only ever runs on targets of registered slugs, and only
   on full paths. Any web page can send your browser to
   `localhost:7778/o/<slug>`, so targets that would run code are shown in
-  Finder rather than opened.
+  Finder rather than opened, judged by the link's name and by what a symlink
+  points to. A request that isn't a navigation (`Sec-Fetch-Dest` other than
+  `document`, as from an `<img>` or `fetch()`) opens nothing.
 - **Serving.** `/f/` serves only registered file/folder slugs, to any device
   on your tailnet (and any account on the hub). Inside a folder slug, `os.Root`
   refuses `..` and symlinks that leave the folder, and dot-paths (`.git`,
-  `.env`) are never served or listed. Every response carries
-  `X-Content-Type-Options: nosniff`.
+  `.env`) are never served or listed. A file link that's a symlink is served
+  only if it points within its own folder, so linking a repository's
+  `notes.txt -> ../../.ssh/id_ed25519` serves nothing. Nothing inside
+  `~/.config/shortlinker` (the token, the records, the click log, backups) is
+  ever served, whatever is linked, even `~/.config` itself; such links still
+  open on this Mac. Every response carries `X-Content-Type-Options: nosniff`.
 - **Sandboxing.** Served pages share one origin, so a page that runs script
-  could read every other served file. HTML, SVG and XML from sl-link's links,
-  and anything inside a folder link, are served with `Content-Security-Policy:
-  sandbox` (scripts run, but in an opaque origin with no storage). A file you
-  linked in `links.txt` is trusted and keeps a normal origin, so pages that
-  save settings in `localStorage` still work. PDFs, images and text aren't
-  sandboxed: they can't run script on this origin.
-- **Files.** `links.txt`, `auto-links.jsonl`, `clicks.jsonl` and the token
-  are readable by you only, and the link files are replaced atomically
-  (temporary file, then rename), so a click during a save or a crash never
-  sees half a file.
+  could read every other served file. Every HTML, SVG and XML file is served
+  with `Content-Security-Policy: sandbox`: its scripts run, but in an opaque
+  origin with no storage. PDFs, images and text can't run script on this
+  origin and aren't sandboxed.
+- **Files.** `links.jsonl`, `clicks.jsonl` and the token are readable by you
+  only, and `links.jsonl` is replaced atomically (temporary file, then
+  rename), so a click during a save or a crash never sees half a file. Click
+  counts are saved within 2 seconds, and when the hub stops; the click
+  itself is in `clicks.jsonl` at once.
+- **Terminal output.** File names can hold control characters, which could
+  retitle a terminal or write its clipboard, so the commands print them
+  escaped (`\x1b`). The menu replaces them with spaces.
+- **Project detection** reads a `.git` file only if you own it and it's a
+  small regular file, so a pipe someone plants at `/tmp/.git` can't hang the
+  hub.
 - **Click details are statistics, not proof.** The device comes from the
   `X-Forwarded-For` header `tailscale serve` adds, and anything on the hub Mac
   can send its own. Nothing uses it to decide access.
 
 ## Upgrading
 
-The hub brings older layouts up to date when it starts, with every slug,
-target and phone page unchanged:
+The hub brings older layouts into `links.jsonl` when it starts, with every
+slug, target and phone page unchanged, and keeps each old file as a backup:
 
-- Before sl-link had a file of its own, its links sat at the end of
-  `links.txt` under a `# Added by sl-link` line. They move to
-  `auto-links.jsonl`, and the old file is kept as `links.txt.before-split`.
-- Then sl-link had `auto-links.txt`, a text file. Its links move to
-  `auto-links.jsonl`, and it's kept as `auto-links.txt.before-records`.
+- `links.txt`, where your links used to be, becomes kept records, with a
+  comment right above a link as its note. It's kept as
+  `links.txt.before-records`. If it still has sl-link's links at the end,
+  under a `# Added by sl-link` line, those become ordinary records.
+- `auto-links.jsonl`, sl-link's records, is kept as
+  `auto-links.jsonl.before-merge`. Where a slug was in both files,
+  `links.txt`'s target wins, as it did, and the record's history stays.
+- `auto-links.txt`, sl-link's file before records, is kept as
+  `auto-links.txt.before-records`.
 
-Moved links are dated the day they move, so nothing archives for 30 days.
-Older versions also saved `links.txt` readable by every account on the Mac;
-the hub makes it private.
+Links that had no record are dated the day they move, so nothing archives
+for 30 days, and your links get their clicks from `clicks.jsonl`.
 
 ## Troubleshooting
 

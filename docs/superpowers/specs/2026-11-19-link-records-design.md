@@ -5,6 +5,14 @@
 record the routes `renamed` (sent on to the new slug) and `removed` (a
 tombstone answered), and the API gives each link an `archives_at` time.
 
+**Since then (same day):** `links.txt` merged into the records. Every link
+is now a record in `links.jsonl`, and "yours" became a `kept` flag (kept
+links never archive and prune skips them), so a link you keep holds on to
+its creation date, session, note and clicks. Records also gained
+`last_device`. `shortlinker export` and `import` cover the plain-text uses
+`links.txt` had. Below, "sl-link's links" and `auto-links.jsonl` describe
+the design as first proposed.
+
 ## Why
 
 sl-link makes a link for every file an agent shows you. On one heavy user's

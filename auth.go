@@ -89,6 +89,23 @@ const (
 	sessionTTL = 12 * time.Hour
 )
 
+// hubProof is what the hub answers to a command's nonce before the command
+// sends the token (see handleHubProof): only something that knows the token
+// can work it out. The label keeps it from being any other MAC the hub makes.
+func hubProof(token, nonce string) string {
+	h := hmac.New(sha256.New, []byte(token))
+	h.Write([]byte("shortlinker hub proof\x00" + nonce))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func isNonce(n string) bool {
+	if len(n) < 32 || len(n) > 64 {
+		return false
+	}
+	_, err := hex.DecodeString(n)
+	return err == nil
+}
+
 // apiAuth checks the local API's credentials: the token itself, or a
 // session the manage page got by trading in a one-time code.
 type apiAuth struct {

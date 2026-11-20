@@ -90,6 +90,9 @@ func (s *Server) LocalHandler() http.Handler {
 		mux.HandleFunc("POST /api/links/{slug}/phone", s.requireAuth(s.handleSetPhone))
 		mux.HandleFunc("POST /api/links/{slug}/rename", s.requireAuth(s.handleRename))
 		mux.HandleFunc("POST /api/links/{slug}/archive", s.requireAuth(s.handleArchive))
+		mux.HandleFunc("POST /api/links/{slug}/note", s.requireAuth(s.handleSetNote))
+		mux.HandleFunc("POST /api/links/{slug}/keep", s.requireAuth(s.handleKeep))
+		mux.HandleFunc("GET /api/hub-proof", s.handleHubProof) // before any token is sent
 		mux.HandleFunc("GET /api/links/{slug}/clicks", s.requireAuth(s.handleClicks))
 		mux.HandleFunc("GET /api/stats", s.requireAuth(s.handleStats))
 		mux.HandleFunc("POST /api/prune", s.requireAuth(s.handlePrune))
@@ -193,12 +196,18 @@ func (s *Server) handleShortlink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	defer func() {
+		if click.Route == "" {
+			return
+		}
 		if err := s.store.RecordClick(click); err != nil {
 			log.Printf("recording a click on %s: %v", slug, err)
 		}
 	}()
 	if !ok {
 		route("unknown")
+		if !ValidSlug(slug) || len(slug) > maxLoggedSlug {
+			click.Route = "" // not a slug anyone could have been given: not worth a line
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -250,6 +259,10 @@ func (s *Server) handleShortlink(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, dest, http.StatusFound)
 }
 
+// maxLoggedSlug is the longest unknown slug the click log keeps; picked
+// slugs are at most 60 characters plus a number.
+const maxLoggedSlug = 100
+
 // clickDevice is the clicking device's tailnet address, which `tailscale
 // serve` puts in X-Forwarded-For, or "local" for a request made on this Mac.
 // Anything on this Mac can set the header, so it's for statistics only.
@@ -277,7 +290,7 @@ func clientKind(userAgent string) string {
 // its full URL, or "" when there's none or it's this hub.
 func refOrigin(r *http.Request) string {
 	u, err := url.Parse(r.Referer())
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || len(u.Host) > 255 {
 		return ""
 	}
 	if strings.EqualFold(u.Hostname(), hostOf(r.Host)) {
@@ -290,6 +303,13 @@ func refOrigin(r *http.Request) string {
 // Apps and scripts are shown in Finder instead: any web page can send the
 // browser here, and opening one of those would run it.
 func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
+	// A click arrives as a navigation. A page that fetches /o/ in the
+	// background, with an <img> or fetch(), could open your files without
+	// your seeing it; browsers say which this is in Sec-Fetch-Dest.
+	if dest := r.Header.Get("Sec-Fetch-Dest"); dest != "" && dest != "document" {
+		http.Error(w, "links open when you click them, not from inside a page", http.StatusForbidden)
+		return
+	}
 	slug := r.PathValue("slug")
 	target, ok, err := s.resolve(slug)
 	if err != nil {
@@ -338,10 +358,18 @@ var codeExts = map[string]bool{
 }
 
 // runsCode reports whether opening path could run code: an app, a script,
-// an installer, or any executable file.
+// an installer, or any executable file. A symlink is judged by its own name
+// and by what it points to, since `open` follows it: guide.pdf can point
+// at an app.
 func runsCode(path string) bool {
-	if codeExts[strings.ToLower(filepath.Ext(strings.TrimRight(path, "/")))] {
-		return true
+	names := []string{path}
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		names = append(names, real)
+	}
+	for _, p := range names {
+		if codeExts[strings.ToLower(filepath.Ext(strings.TrimRight(p, "/")))] {
+			return true
+		}
 	}
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0
@@ -397,14 +425,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // linkDetails is one link as the manage page, `shortlinker ls` and the menu
-// see it. The record fields are empty for your links, except the clicks,
-// which come from the click log.
+// see it.
 type linkDetails struct {
 	Slug        string     `json:"slug"`
 	Target      string     `json:"target"`
 	Phone       string     `json:"phone,omitempty"`
-	Source      string     `json:"source"` // "yours" (links.txt) or "sl-link"
-	Kind        string     `json:"kind"`   // "url", "file", "folder" or "missing"
+	Kind        string     `json:"kind"` // "url", "file", "folder" or "missing"
+	Kept        bool       `json:"kept"`
 	Created     *time.Time `json:"created,omitempty"`
 	Origin      string     `json:"origin,omitempty"`
 	Project     string     `json:"project,omitempty"`
@@ -414,61 +441,25 @@ type linkDetails struct {
 	LastLinked  *time.Time `json:"last_linked,omitempty"`
 	Clicks      int        `json:"clicks"`
 	LastClicked *time.Time `json:"last_clicked,omitempty"`
+	LastDevice  string     `json:"last_device,omitempty"` // named, as in clickView
 	Archived    *time.Time `json:"archived,omitempty"`
 	ArchivesAt  *time.Time `json:"archives_at,omitempty"` // when it archives if nothing happens first
 	Removed     *Removal   `json:"removed,omitempty"`
 }
 
-// countsAsUse is whether a click route counts as a use of the link.
-func countsAsUse(route string) bool {
-	return route != "unknown" && route != "removed" && route != "renamed"
-}
-
 func (s *Server) details(entries []Entry) []linkDetails {
-	type use struct {
-		n    int
-		last time.Time
-	}
-	var uses map[string]*use // your links' clicks, read from the log only if needed
 	out := make([]linkDetails, 0, len(entries))
 	for _, e := range entries {
-		d := linkDetails{Slug: e.Slug, Target: e.Target, Phone: e.Phone, Source: "yours", Kind: "url"}
-		if r := e.Rec; r != nil {
-			d.Source = "sl-link"
-			if r.Origin == "yours" {
-				d.Source = "yours" // a tombstone of one of your links
-			}
-			d.Created, d.Origin, d.Project, d.Session, d.Note = timePtr(r.Created), r.Origin, r.Project, r.Session, r.Note
-			d.Linked, d.LastLinked, d.Clicks, d.LastClicked = r.Linked, r.LastLinked, r.Clicks, r.LastClicked
-			d.Archived, d.Removed = r.Archived, r.Removed
-			if r.active() {
-				d.ArchivesAt = timePtr(r.ArchivesAt())
-			}
-		} else {
-			if uses == nil {
-				uses = map[string]*use{}
-				clicks, err := s.store.Clicks("", 0)
-				if err != nil {
-					log.Printf("reading clicks: %v", err)
-				}
-				for _, c := range clicks {
-					if !countsAsUse(c.Route) {
-						continue
-					}
-					u := uses[c.Slug]
-					if u == nil {
-						u = &use{}
-						uses[c.Slug] = u
-					}
-					u.n++
-					if c.T.After(u.last) {
-						u.last = c.T
-					}
-				}
-			}
-			if u := uses[e.Slug]; u != nil {
-				d.Clicks, d.LastClicked = u.n, timePtr(u.last)
-			}
+		r := e.Rec
+		d := linkDetails{Slug: e.Slug, Target: e.Target, Phone: e.Phone, Kind: "url", Kept: r.Kept,
+			Created: timePtr(r.Created), Origin: r.Origin, Project: r.Project, Session: r.Session, Note: r.Note,
+			Linked: r.Linked, LastLinked: r.LastLinked, Clicks: r.Clicks, LastClicked: r.LastClicked,
+			Archived: r.Archived, Removed: r.Removed}
+		if r.LastDevice != "" {
+			d.LastDevice = s.viewClick(Click{Device: r.LastDevice}).Device
+		}
+		if r.archivable() {
+			d.ArchivesAt = timePtr(r.ArchivesAt())
 		}
 		if !IsRedirect(e.Target) {
 			switch fi, err := os.Stat(ExpandPath(e.Target, s.home)); {
@@ -486,7 +477,7 @@ func (s *Server) details(entries []Entry) []linkDetails {
 }
 
 // handleListLinks lists the links in use as {slug: target}, or with
-// ?details=1 as {"hub": <address>, "links": [linkDetails...]} in file order.
+// ?details=1 as {"hub": <address>, "links": [linkDetails...]}, kept first.
 // With details, ?archived=1 adds archived links and ?removed=1 tombstones.
 func (s *Server) handleListLinks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -533,15 +524,17 @@ func (s *Server) handleSetLink(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Slug    string `json:"slug"`
 		Target  string `json:"target"`
-		Origin  string `json:"origin"`  // sl-link, finder, api or manage
+		Phone   string `json:"phone"`
+		Origin  string `json:"origin"`  // sl-link, finder, api, manage or import
 		Session string `json:"session"` // the agent session making it
 		Note    string `json:"note"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
 	}
+	meta := Meta{Origin: body.Origin, Session: body.Session, Note: body.Note}
 	if body.Slug == "" { // a file or folder with no slug yet: pick one
-		slug, created, err := s.store.Ensure(body.Target, s.home, Meta{Origin: body.Origin, Session: body.Session, Note: body.Note})
+		slug, created, err := s.store.Ensure(body.Target, s.home, meta)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -554,11 +547,49 @@ func (s *Server) handleSetLink(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"slug": slug, "target": body.Target, "created": created, "phone": link.Phone})
 		return
 	}
-	if err := s.store.Set(body.Slug, body.Target); err != nil {
+	if err := s.store.Set(body.Slug, body.Target, s.home, meta); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"slug": body.Slug, "target": body.Target})
+	if body.Phone != "" {
+		if err := s.store.SetPhone(body.Slug, body.Phone); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "the link is saved, but not its phone page: " + err.Error()})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"slug": body.Slug, "target": body.Target, "kept": true})
+}
+
+// handleSetNote replaces a link's note. Body: {"note": "..."}; "" removes it.
+func (s *Server) handleSetNote(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Note string `json:"note"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	slug := r.PathValue("slug")
+	if err := s.store.SetNote(slug, body.Note); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"slug": slug, "note": cleanNote(body.Note)})
+}
+
+// handleKeep keeps a link or stops keeping it. Body: {"kept": bool}.
+func (s *Server) handleKeep(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Kept bool `json:"kept"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	slug := r.PathValue("slug")
+	if err := s.store.SetKept(slug, body.Kept); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"slug": slug, "kept": body.Kept})
 }
 
 func (s *Server) handleDeleteLink(w http.ResponseWriter, r *http.Request) {
@@ -602,7 +633,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"slug": body.To, "was": slug})
 }
 
-// handleArchive archives an sl-link link or restores it. Body: {"archived": bool}.
+// handleArchive archives a link that isn't kept, or restores it. Body: {"archived": bool}.
 func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Archived bool `json:"archived"`
@@ -673,14 +704,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	now := s.store.now()
 	week, month := now.Add(-7*24*time.Hour), now.Add(-30*24*time.Hour)
 	st := struct {
-		Links        int            `json:"links"` // in use: yours plus sl-link's that aren't archived
-		Yours        int            `json:"yours"`
-		Auto         int            `json:"auto"`
+		Links        int            `json:"links"` // in use: not archived or removed
+		Kept         int            `json:"kept"`
 		Archived     int            `json:"archived"`
 		Removed      int            `json:"removed"`
 		Missing      int            `json:"missing"` // links in use whose file is gone
 		MadeWeek     int            `json:"made_week"`
-		NeverClicked int            `json:"never_clicked"` // sl-link links in use
+		NeverClicked int            `json:"never_clicked"` // links in use, not kept
 		ClicksWeek   int            `json:"clicks_week"`
 		ClicksMonth  int            `json:"clicks_month"`
 		ByDevice     map[string]int `json:"by_device"` // last 30 days
@@ -694,16 +724,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		case d.Archived != nil:
 			st.Archived++
 			continue
-		case d.Source == "yours":
-			st.Yours++
-		default:
-			st.Auto++
-			if d.Clicks == 0 {
-				st.NeverClicked++
-			}
-			if d.Created != nil && d.Created.After(week) {
-				st.MadeWeek++
-			}
+		case d.Kept:
+			st.Kept++
+		case d.Clicks == 0:
+			st.NeverClicked++
+		}
+		if d.Created != nil && d.Created.After(week) && d.Origin != "import" { // imported isn't made
+			st.MadeWeek++
 		}
 		st.Links++
 		if d.Kind == "missing" {
@@ -728,7 +755,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
-// handlePrune removes sl-link links whose file is gone. Body: {"dry_run": bool}.
+// handlePrune removes links that aren't kept and whose file is gone. Body: {"dry_run": bool}.
 func (s *Server) handlePrune(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		DryRun bool `json:"dry_run"`
@@ -736,7 +763,7 @@ func (s *Server) handlePrune(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	removed, err := s.store.PruneAuto(s.home, body.DryRun)
+	removed, err := s.store.Prune(s.home, body.DryRun)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -751,11 +778,20 @@ func (s *Server) handleManageCode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "a code needs the token itself"})
 		return
 	}
-	code := s.auth.newCode()
-	writeJSON(w, http.StatusOK, map[string]string{
-		"code": code,
-		"url":  "http://localhost:" + s.localPort + "/manage#code=" + code,
-	})
+	writeJSON(w, http.StatusOK, map[string]string{"code": s.auth.newCode()})
+}
+
+// handleHubProof answers a command's check that this is the hub before it
+// sends the token: ?n=<nonce> gets {"proof": hubProof(token, nonce)}.
+// Something else on this port, such as another account's server started
+// while the hub was down, can't answer it.
+func (s *Server) handleHubProof(w http.ResponseWriter, r *http.Request) {
+	n := r.URL.Query().Get("n")
+	if !isNonce(n) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "n must be 32 to 64 hex digits"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"proof": hubProof(s.auth.token, n)})
 }
 
 // handleSession trades a one-time code for a session. Body: {"code": "..."}.
@@ -783,5 +819,5 @@ func (s *Server) handleManagePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	fmt.Fprint(w, managePage)
+	w.Write(managePage)
 }

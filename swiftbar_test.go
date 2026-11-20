@@ -3,29 +3,36 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func testMenu(state string, links ...linkDetails) menuInput {
 	return menuInput{
 		bin: "/Users/x/.local/bin/shortlinker", state: state, links: links,
-		linksPath: "/Users/x/.config/shortlinker/links.txt", logPath: "/Users/x/Library/Logs/shortlinker.log",
-		label: "com.x.shortlinker", uid: 501,
+		logPath: "/Users/x/Library/Logs/shortlinker.log",
+		label:   "com.x.shortlinker", uid: 501,
 	}
+}
+
+// linked is a link sl-link printed, the given number of minutes after noon.
+func linked(slug, target, kind string, minute int) linkDetails {
+	at := time.Date(2026, 11, 19, 12, minute, 0, 0, time.UTC)
+	return linkDetails{Slug: slug, Target: target, Kind: kind, Linked: 1, Created: &at, LastLinked: &at}
 }
 
 func TestMenuShowsLinksAndActions(t *testing.T) {
 	m := testMenu("up",
-		linkDetails{Slug: "budget", Target: "~/b.numbers", Source: "yours", Kind: "file"},
-		linkDetails{Slug: "readme-md", Target: "~/Code/a/README.md", Source: "sl-link", Kind: "file"},
-		linkDetails{Slug: "gone-md", Target: "~/gone.md", Source: "sl-link", Kind: "missing"},
-		linkDetails{Slug: "b-readme-md", Target: "~/Code/b/README.md", Source: "sl-link", Kind: "file"},
-		linkDetails{Slug: "site", Target: "~/Sites/my site|v2", Source: "sl-link", Kind: "folder"},
+		linkDetails{Slug: "budget", Target: "~/b.numbers", Kind: "file", Kept: true},
+		linked("readme-md", "~/Code/a/README.md", "file", 1),
+		linked("gone-md", "~/gone.md", "missing", 2),
+		linked("site", "~/Sites/my site|v2", "folder", 4),
+		linked("b-readme-md", "~/Code/b/README.md", "file", 3),
 	)
 	got := renderMenu(m)
 	for _, want := range []string{
-		"| sfimage=link\n---\n5 links · 1 yours · 4 from sl-link\n---\n",
+		"| sfimage=link\n---\n5 links · 1 kept\n---\n",
 		"Link Finder selection | bash=/Users/x/.local/bin/shortlinker param1=menu param2=link param3=--selection param4=--copy param5=--notify terminal=false sfimage=link.badge.plus\n",
-		"Find links… | bash=/Users/x/.local/bin/shortlinker param1=manage terminal=false sfimage=magnifyingglass\n",
+		"Manage links… | bash=/Users/x/.local/bin/shortlinker param1=manage terminal=false sfimage=list.bullet.rectangle\n",
 		"Recently linked | sfimage=clock refresh=true\n",
 		// newest first; the two README.md files say which folder; "|" can't break the line
 		"--my site¦v2 | bash=/Users/x/.local/bin/shortlinker param1=copy param2=--notify param3=site terminal=false sfimage=folder\n",
@@ -33,7 +40,6 @@ func TestMenuShowsLinksAndActions(t *testing.T) {
 		"--README.md · b as Markdown | bash=/Users/x/.local/bin/shortlinker param1=copy param2=--markdown param3=--notify param4=b-readme-md terminal=false sfimage=text.quote alternate=true\n",
 		"--README.md · a | ",
 		"Prune 1 dead link | bash=/Users/x/.local/bin/shortlinker param1=prune param2=--notify terminal=false refresh=true sfimage=trash\n",
-		"Edit links.txt | bash=/usr/bin/open param1=-t param2=/Users/x/.config/shortlinker/links.txt terminal=false sfimage=square.and.pencil\n",
 		"---\nRestart shortlinker | bash=/bin/launchctl param1=kickstart param2=-k param3=gui/501/com.x.shortlinker terminal=false refresh=true sfimage=arrow.clockwise\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -41,18 +47,21 @@ func TestMenuShowsLinksAndActions(t *testing.T) {
 		}
 	}
 	if strings.Contains(got, "gone.md |") || strings.Contains(got, "param3=budget") {
-		t.Errorf("recent shows a missing file or one of your links:\n%s", got)
+		t.Errorf("recent shows a missing file or a link sl-link never printed:\n%s", got)
 	}
-	if strings.Index(got, "param3=site") > strings.Index(got, "param3=readme-md") {
-		t.Errorf("recent isn't newest first:\n%s", got)
+	if !(strings.Index(got, "param3=site") < strings.Index(got, "param3=b-readme-md") && strings.Index(got, "param3=b-readme-md") < strings.Index(got, "param3=readme-md")) {
+		t.Errorf("recent isn't newest linked first:\n%s", got)
+	}
+	if strings.Contains(got, "links.txt") {
+		t.Errorf("the menu still mentions links.txt:\n%s", got)
 	}
 }
 
 func TestMenuNestedLeavesOutTheMenuBarAndServiceRows(t *testing.T) {
-	m := testMenu("up", linkDetails{Slug: "a", Target: "/a", Source: "yours", Kind: "file"})
+	m := testMenu("up", linkDetails{Slug: "a", Target: "/a", Kind: "file", Kept: true})
 	m.nested = true
 	got := renderMenu(m)
-	if !strings.HasPrefix(got, "1 link · 1 yours · 0 from sl-link\n---\n") {
+	if !strings.HasPrefix(got, "1 link · 1 kept\n---\n") {
 		t.Errorf("nested menu starts with %q", got)
 	}
 	for _, unwanted := range []string{"sfimage=link\n", "Restart", "Open log", "Prune"} {
@@ -78,11 +87,11 @@ func TestMenuKeepsItsShape(t *testing.T) {
 		}
 		return rows
 	}
-	empty := testMenu("up", linkDetails{Slug: "a", Target: "/a", Source: "yours", Kind: "file"})
+	empty := testMenu("up", linkDetails{Slug: "a", Target: "/a", Kind: "file", Kept: true})
 	busy := testMenu("up",
-		linkDetails{Slug: "a", Target: "/a", Source: "yours", Kind: "file"},
-		linkDetails{Slug: "b", Target: "/b", Source: "sl-link", Kind: "file"},
-		linkDetails{Slug: "c", Target: "/c", Source: "sl-link", Kind: "missing"},
+		linkDetails{Slug: "a", Target: "/a", Kind: "file", Kept: true},
+		linked("b", "/b", "file", 1),
+		linked("c", "/c", "missing", 2),
 	)
 	for _, nested := range []bool{false, true} {
 		empty.nested, busy.nested = nested, nested
@@ -114,7 +123,7 @@ func TestMenuQuote(t *testing.T) {
 			t.Errorf("menuQuote(%q) = %s, want %s", in, got, want)
 		}
 	}
-	if got := menuTitle("--x|y"); got != "x¦y" {
+	if got := menuTitle("--x|y\x1b]0;hi\x07"); got != "x¦y ]0;hi " {
 		t.Errorf("menuTitle = %q", got)
 	}
 }

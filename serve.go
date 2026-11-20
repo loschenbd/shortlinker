@@ -5,11 +5,13 @@ import (
 	"html"
 	"io"
 	"io/fs"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -27,30 +29,32 @@ func (s *Server) handleServe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	target, auto := link.Target, link.Auto
+	target := link.Target
 	if !ok || IsRedirect(target) {
 		http.NotFound(w, r)
 		return
 	}
 	full := ExpandPath(target, s.home)
 	info, err := os.Stat(full)
-	if err != nil {
+	if err != nil || s.insideConfig(full) {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-cache") // edits show on reload
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// A page that can run script shares this origin with every other served
-	// file, so it could read them all. Only a file someone linked by hand is
-	// trusted with that; sl-link's links and anything inside a folder link
-	// (a saved web page, say) run sandboxed in an origin of their own.
-	if auto || info.IsDir() {
-		w = &sandboxWriter{ResponseWriter: w}
-	}
+	// A page that can run script would share this origin with every other
+	// served file, and could read them all, so every page runs sandboxed in
+	// an origin of its own. Its scripts still run.
+	w = &sandboxWriter{ResponseWriter: w}
 	base := "/f/" + slug
 
 	if !info.IsDir() {
 		if r.URL.Path != base {
+			http.NotFound(w, r)
+			return
+		}
+		if !staysNearby(full) {
+			log.Printf("not serving %s: it's a symlink to a file outside its folder", slug)
 			http.NotFound(w, r)
 			return
 		}
@@ -74,6 +78,10 @@ func (s *Server) handleServe(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+	}
+	if s.insideConfig(filepath.Join(full, filepath.FromSlash(rest))) { // a link to ~/.config, say
+		http.NotFound(w, r)
+		return
 	}
 	root, err := os.OpenRoot(full)
 	if err != nil {
@@ -117,6 +125,40 @@ func (s *Server) handleServe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeListing(w, slug+"/"+rest, entries)
+}
+
+// insideConfig reports whether path, symlinks followed, is shortlinker's own
+// folder or inside it. The token, every link's record and the click log live
+// there, and /f/ never hands them to the tailnet, whatever is linked: a link
+// to the folder, to a backup in it, or to ~/.config above it. Opening them on
+// this Mac (/o/) is fine.
+func (s *Server) insideConfig(path string) bool {
+	cfg := configDir(s.home)
+	if real, err := filepath.EvalSymlinks(cfg); err == nil {
+		cfg = real
+	}
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
+	rel, err := filepath.Rel(cfg, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// staysNearby reports whether a file link's file, symlinks followed, is in
+// the folder it was linked from or below it. A repository can hold
+// notes.txt -> ../../.ssh/id_ed25519, and linking notes.txt mustn't serve
+// the key. Folder links get the same rule from os.Root.
+func staysNearby(full string) bool {
+	real, err := filepath.EvalSymlinks(full)
+	if err != nil {
+		return false
+	}
+	dir, err := filepath.EvalSymlinks(filepath.Dir(full))
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(dir, real)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // sandboxPolicy gives a served page an opaque origin: its scripts run, but

@@ -6,7 +6,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -26,7 +28,7 @@ func main() {
 	var (
 		port      = flag.String("port", "7777", "public port, the one `tailscale serve` publishes (hub role, loopback only)")
 		localPort = flag.String("local-port", defaultLocalPort, "local-only port for opening files and the link API (never publish it)")
-		links     = flag.String("links", filepath.Join(configDir(home), "links.txt"), "path to your links file (hub role); sl-link's file, "+AutoFile+", sits next to it")
+		links     = flag.String("links", filepath.Join(configDir(home), LinksFile), "path to the links file (hub role); "+ClicksFile+" sits next to it")
 		hub       = flag.String("hub", "", "hub base URL, e.g. https://mac.tailnet.ts.net; setting this runs an opener agent only")
 	)
 	flag.Usage = func() {
@@ -37,18 +39,34 @@ func main() {
 
 	var store *Store
 	if *hub == "" {
-		store = &Store{Path: *links}
-		fromLinks, fromText, err := store.Migrate(home)
+		store = &Store{Path: *links, FlushDelay: 2 * time.Second}
+		m, err := store.Migrate(home)
 		if err != nil {
-			log.Fatalf("moving sl-link's links into %s: %v", store.autoPath(), err)
+			log.Fatalf("moving older links files into %s: %v", *links, err)
 		}
-		if fromLinks > 0 {
-			log.Printf("moved %d sl-link links from %s to %s (the old file is %s.before-split)", fromLinks, *links, store.autoPath(), *links)
-		}
-		if fromText > 0 {
-			log.Printf("moved %d sl-link links from %s to %s (the old file is %s.before-records)", fromText, store.legacyAutoPath(), store.autoPath(), store.legacyAutoPath())
+		for _, moved := range []struct {
+			n          int
+			what, from string
+		}{
+			{m.FromAuto, "sl-link records", autoFile + " (kept as " + autoFile + ".before-merge)"},
+			{m.FromText, "sl-link links", legacyAutoFile + " (kept as " + legacyAutoFile + ".before-records)"},
+			{m.FromSplit, "sl-link links", "the end of " + handFile},
+			{m.FromHand, "of your links, now kept,", handFile + " (kept as " + handFile + ".before-records)"},
+		} {
+			if moved.n > 0 {
+				log.Printf("moved %d %s into %s from %s", moved.n, moved.what, LinksFile, moved.from)
+			}
 		}
 		store.Tighten()
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+		go func() { // launchd stops the hub with SIGTERM: save click counts first
+			<-stop
+			if err := store.Flush(); err != nil {
+				log.Printf("saving click counts: %v", err)
+			}
+			os.Exit(0)
+		}()
 	}
 	srv := NewServer(store, *hub, *localPort, home)
 	if store != nil {
@@ -67,9 +85,9 @@ func main() {
 					log.Printf("can't name tailnet devices yet: %v", err)
 				}
 				if archived, err := store.Archive(); err != nil {
-					log.Printf("archiving unused sl-link links: %v", err)
+					log.Printf("archiving unused links: %v", err)
 				} else if len(archived) > 0 {
-					log.Printf("archived %d sl-link links nobody used (they still work, and come back when clicked)", len(archived))
+					log.Printf("archived %d links nobody used (they still work, and come back when clicked)", len(archived))
 				}
 				time.Sleep(time.Hour)
 			}
@@ -86,7 +104,7 @@ func main() {
 	if store != nil {
 		public := "127.0.0.1:" + *port
 		go func() { errc <- serve(public, srv.PublicHandler()) }()
-		log.Printf("shortlinker hub on http://%s (public) and http://%s (local only; links: %s, %s)", public, local, *links, store.autoPath())
+		log.Printf("shortlinker hub on http://%s (public) and http://%s (local only; links: %s)", public, local, *links)
 	} else {
 		log.Printf("shortlinker agent on http://%s (hub: %s)", local, *hub)
 	}

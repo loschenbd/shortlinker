@@ -197,7 +197,7 @@ func TestServeSandboxesScriptablePagesUnlessLinkedByHand(t *testing.T) {
 		"noext = " + filepath.Join(dir, "noext") + "\n"
 	srv, _ := newTestServerFor(t, newSplitStore(t, hand, auto))
 	for path, wantSandbox := range map[string]bool{
-		"/f/hand":            false, // a page linked by hand keeps its storage
+		"/f/hand":            true, // every page, kept or not
 		"/f/auto-html":       true,
 		"/f/auto-svg":        true,
 		"/f/noext":           true,  // sniffed as HTML

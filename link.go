@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -58,6 +60,10 @@ var errUnreachable = errors.New("hub unreachable")
 // errNoAPI means the address answered but isn't a hub (an opener agent).
 var errNoAPI = errors.New("this Mac isn't the shortlinker hub, so it can't make links")
 
+// errNotHub means whatever answers on the API's port couldn't prove it's the
+// hub, so nothing was sent to it.
+var errNotHub = errors.New("what answers on the API's port couldn't prove it's the hub (it doesn't know the token in ~/.config/shortlinker/token), so the token wasn't sent; if the token changed, restart the hub")
+
 // linker registers a target with the hub and returns its slug and its
 // phone page, if it has one.
 type linker func(target string) (slug, phone string, err error)
@@ -75,10 +81,17 @@ type linkOptions struct {
 	savePhone func(slug, url string) error
 }
 
-// api talks to the hub's local API with its token.
+// api talks to the hub's local API with its token. Before the first
+// request it checks that the hub is what's listening (see prove).
 type api struct {
 	base, token string
 	client      *http.Client
+	proof       *proofOnce // shared by copies of this api; nil checks before every request
+}
+
+type proofOnce struct {
+	once sync.Once
+	err  error
 }
 
 // localAPI is the hub's API on this Mac: SHORTLINKER_API, else
@@ -92,12 +105,48 @@ func localAPI(home string, timeout time.Duration) (api, error) {
 	if err != nil {
 		return api{}, err
 	}
-	return api{base: strings.TrimRight(base, "/"), token: token, client: &http.Client{Timeout: timeout}}, nil
+	return api{base: strings.TrimRight(base, "/"), token: token, client: &http.Client{Timeout: timeout}, proof: &proofOnce{}}, nil
+}
+
+// prove checks that what answers on the API's port knows the token,
+// without sending it. Anything on this Mac can bind 127.0.0.1:7778 while
+// the hub is down (another account's process, say); without this check,
+// every command, the menu bar plugin included, would hand it the token.
+func (a api) prove() error {
+	if a.proof == nil {
+		return a.challenge()
+	}
+	a.proof.once.Do(func() { a.proof.err = a.challenge() })
+	return a.proof.err
+}
+
+func (a api) challenge() error {
+	nonce := randomHex(16)
+	resp, err := a.client.Get(a.base + "/api/hub-proof?n=" + nonce)
+	if err != nil {
+		return fmt.Errorf("%w (is it running? ~/Library/Logs/shortlinker.log): %v", errUnreachable, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return errNoAPI // an opener agent, which has no API
+	}
+	var body struct {
+		Proof string `json:"proof"`
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &body) != nil ||
+		!hmac.Equal([]byte(body.Proof), []byte(hubProof(a.token, nonce))) {
+		return errNotHub
+	}
+	return nil
 }
 
 // do sends a request (with a JSON body if body isn't nil) and decodes the
 // JSON reply into result.
 func (a api) do(method, path string, body, result any) error {
+	if err := a.prove(); err != nil {
+		return err
+	}
 	var rd io.Reader
 	if body != nil {
 		data, _ := json.Marshal(body)

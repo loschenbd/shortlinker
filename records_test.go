@@ -169,29 +169,84 @@ func TestRenameLeavesATombstoneThatSendsClicksOn(t *testing.T) {
 	if err := s.Rename("budget", "money"); err != nil {
 		t.Fatal(err)
 	}
-	if r := recOf(t, s, "budget"); r.Removed == nil || r.Removed.To != "money" || r.Origin != "yours" {
-		t.Errorf("your renamed link's old slug = %+v", r)
+	if r := recOf(t, s, "budget"); r.Removed == nil || r.Removed.To != "money" || r.Origin != "import" {
+		t.Errorf("the renamed kept link's old slug = %+v", r)
 	}
-	if read(t, s.Path) != "money = /y/budget.numbers\n" {
-		t.Errorf("links.txt = %q", read(t, s.Path))
+	if r := recOf(t, s, "money"); !r.Kept || r.Target != "/y/budget.numbers" {
+		t.Errorf("money = %+v", r)
 	}
 }
 
-func TestNamingALinkMovesItsRecordToYours(t *testing.T) {
+func TestKeepingALinkKeepsItsRecord(t *testing.T) {
 	s := newTestStore(t, "")
-	withClock(s)
-	slug := mustEnsure(t, s, "/y/a.md", Meta{})
-	if err := s.SetPhone(slug, "https://sb/a"); err != nil {
+	c := withClock(s)
+	slug := mustEnsure(t, s, "/y/a.md", Meta{Session: "s1", Note: "why"})
+	c.advance(days(40))
+	if got, _ := s.Archive(); len(got) != 1 {
+		t.Fatalf("archived %v", got)
+	}
+	if err := s.SetKept(slug, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Set(slug, "/y/a.md"); err != nil {
+	r := recOf(t, s, slug)
+	if !r.Kept || r.Archived != nil || r.Session != "s1" || r.Note != "why" || !r.Created.Equal(testNow) {
+		t.Fatalf("kept = %+v; want it restored with its record", r)
+	}
+	c.advance(days(400))
+	if got, _ := s.Archive(); len(got) != 0 {
+		t.Errorf("a kept link archived: %v", got)
+	}
+	if err := s.SetArchived(slug, true); err == nil {
+		t.Error("archiving a kept link should fail")
+	}
+	// Stop keeping it, and its archive clock starts again from now.
+	if err := s.SetKept(slug, false); err != nil {
 		t.Fatal(err)
 	}
-	if got := read(t, s.Path); got != "a-md = /y/a.md | https://sb/a\n" {
-		t.Errorf("links.txt = %q", got)
+	if r := recOf(t, s, slug); r.Kept || !r.ArchivesAt().Equal(c.t.Add(archiveUnclicked)) {
+		t.Errorf("after unkeeping: kept %v, archives at %v", r.Kept, r.ArchivesAt())
 	}
-	if e, _, _ := s.Find(slug); e.Rec != nil {
-		t.Error("the record should be gone once the link is yours")
+	if err := s.SetKept("nope", true); err == nil {
+		t.Error("keeping an unknown slug should fail")
+	}
+}
+
+func TestNotes(t *testing.T) {
+	s := newTestStore(t, "a = https://example.com\n")
+	if err := s.SetNote("a", "  two\nlines\x1b[0m "+strings.Repeat("x", 300)); err != nil {
+		t.Fatal(err)
+	}
+	if r := recOf(t, s, "a"); strings.ContainsAny(r.Note, "\n\x1b") || len([]rune(r.Note)) != maxNote || !strings.HasPrefix(r.Note, "two lines [0m x") {
+		t.Errorf("note = %q", r.Note)
+	}
+	if err := s.SetNote("a", ""); err != nil || recOf(t, s, "a").Note != "" {
+		t.Errorf("clearing the note: %v, %q", err, recOf(t, s, "a").Note)
+	}
+}
+
+func TestClickCountsWaitAndAreSavedOnFlush(t *testing.T) {
+	s := newTestStore(t, "a = https://example.com\n")
+	s.FlushDelay = time.Hour
+	before := read(t, s.Path)
+	for range 3 {
+		if err := s.RecordClick(Click{Slug: "a", Route: "redirect", Device: "100.101.102.103"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r := recOf(t, s, "a"); r.Clicks != 3 || r.LastDevice != "100.101.102.103" {
+		t.Fatalf("in memory: %+v", r)
+	}
+	if read(t, s.Path) != before {
+		t.Error("the file was rewritten on each click")
+	}
+	if strings.Count(read(t, s.clicksPath()), "\n") != 3 {
+		t.Error("the click log should have every click at once")
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if fresh := (&Store{Path: s.Path}); recOf(t, fresh, "a").Clicks != 3 {
+		t.Errorf("after Flush the file has %d clicks", recOf(t, fresh, "a").Clicks)
 	}
 }
 
@@ -199,11 +254,11 @@ func TestUnreadableRecordLinesAreKept(t *testing.T) {
 	s := newTestStore(t, "")
 	withClock(s)
 	good, _ := json.Marshal(Record{Slug: "a", Target: "/a", Created: testNow})
-	if err := os.WriteFile(s.autoPath(), []byte(string(good)+"\n{not json\n"), 0o600); err != nil {
+	if err := os.WriteFile(s.Path, []byte(string(good)+"\n{not json\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	mustEnsure(t, s, "/y/b.md", Meta{})
-	if got := read(t, s.autoPath()); !strings.Contains(got, "{not json") || !strings.Contains(got, `"slug":"b-md"`) || !strings.Contains(got, `"slug":"a"`) {
+	if got := read(t, s.Path); !strings.Contains(got, "{not json") || !strings.Contains(got, `"slug":"b-md"`) || !strings.Contains(got, `"slug":"a"`) {
 		t.Errorf("records file =\n%s", got)
 	}
 }
@@ -229,9 +284,9 @@ func TestMigrateMovesTheTextFileToRecords(t *testing.T) {
 	if err := os.WriteFile(legacy, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fromLinks, fromText, err := s.Migrate("/Users/test")
-	if err != nil || fromLinks != 0 || fromText != 2 {
-		t.Fatalf("Migrate = %d, %d, %v; want 0, 2", fromLinks, fromText, err)
+	m, err := s.Migrate("/Users/test")
+	if err != nil || m != (Migration{FromText: 2}) {
+		t.Fatalf("Migrate = %+v, %v; want 2 from the text file", m, err)
 	}
 	if got := autoText(t, s); got != "a-md = /y/a.md\nb-md = /y/b.md | https://sb/b\n" {
 		t.Errorf("records = %q", got)
@@ -245,8 +300,8 @@ func TestMigrateMovesTheTextFileToRecords(t *testing.T) {
 	if got := read(t, legacy+".before-records"); got != text {
 		t.Errorf("backup = %q", got)
 	}
-	if _, fromText, err := s.Migrate("/Users/test"); err != nil || fromText != 0 {
-		t.Errorf("second Migrate moved %d, %v", fromText, err)
+	if m, err := s.Migrate("/Users/test"); err != nil || m.Any() {
+		t.Errorf("second Migrate moved %+v, %v", m, err)
 	}
 }
 
@@ -363,8 +418,8 @@ func TestDetailsStatsAndArchiveAPI(t *testing.T) {
 	if d := byslug[slug]; d.Session != "s1" || d.Note != "why" || d.Origin != "sl-link" || d.ArchivesAt == nil || !d.ArchivesAt.Equal(testNow.Add(archiveUnclicked)) {
 		t.Errorf("details = %+v", d)
 	}
-	if d := byslug["mine"]; d.Clicks != 1 || d.LastClicked == nil || d.Source != "yours" {
-		t.Errorf("your link's clicks come from the log: %+v", d)
+	if d := byslug["mine"]; d.Clicks != 1 || d.LastClicked == nil || !d.Kept || d.LastDevice != "local" || d.ArchivesAt != nil {
+		t.Errorf("kept link = %+v", d)
 	}
 
 	if rec := send(srv, "POST", "http://localhost/api/links/"+slug+"/archive", `{"archived":true}`); rec.Code != 200 {
@@ -384,7 +439,7 @@ func TestDetailsStatsAndArchiveAPI(t *testing.T) {
 
 	var st map[string]any
 	json.Unmarshal(send(srv, "GET", "http://localhost/api/stats", "").Body.Bytes(), &st)
-	for k, want := range map[string]float64{"links": 2, "yours": 1, "auto": 1, "archived": 1, "never_clicked": 1, "clicks_week": 1} {
+	for k, want := range map[string]float64{"links": 2, "kept": 1, "archived": 1, "never_clicked": 1, "clicks_week": 1, "made_week": 1} {
 		if st[k] != want {
 			t.Errorf("stats[%s] = %v, want %v (all: %v)", k, st[k], want, st)
 		}
@@ -397,4 +452,32 @@ func slugsOf2(ds []linkDetails) string {
 		s = append(s, d.Slug)
 	}
 	return strings.Join(s, ",")
+}
+
+func TestClickLogStaysBounded(t *testing.T) {
+	s := newTestStore(t, "a = https://example.com\n")
+	withClock(s)
+	srv, _ := newTestServerFor(t, s)
+	// Slugs nobody could have been given aren't logged, and nor are huge referrers' hosts.
+	get(srv, "http://hub.example.ts.net/"+strings.Repeat("x", 5000), desktopUA)
+	get(srv, "http://hub.example.ts.net/Not_A_Slug", desktopUA)
+	send(srv, "GET", "http://hub.example.ts.net/a", "", "User-Agent", desktopUA, "Referer", "https://"+strings.Repeat("h", 300)+".example/")
+	clicks, _ := s.Clicks("", 0)
+	if len(clicks) != 1 || clicks[0].Slug != "a" || clicks[0].Ref != "" {
+		t.Fatalf("clicks = %+v", clicks)
+	}
+	// Past the cap the log moves aside, and both files are still read.
+	defer func(n int64) { maxClicksFile = n }(maxClicksFile)
+	maxClicksFile = 1
+	get(srv, "http://hub.example.ts.net/a", desktopUA)
+	get(srv, "http://hub.example.ts.net/a", desktopUA)
+	if _, err := os.Stat(s.clicksPath() + ".1"); err != nil {
+		t.Fatalf("no clicks.jsonl.1: %v", err)
+	}
+	if clicks, _ := s.Clicks("a", 0); len(clicks) < 2 {
+		t.Errorf("after moving aside, %d clicks are readable", len(clicks))
+	}
+	if strings.Count(read(t, s.clicksPath())+read(t, s.clicksPath()+".1"), "\n") > 2 {
+		t.Error("older clicks should be dropped once a second file fills, not kept forever")
+	}
 }

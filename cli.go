@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+	"unicode"
 )
 
 const usage = `usage: shortlinker [command]
@@ -22,19 +25,25 @@ With no command, runs the server (see --help for its flags).
 
   link <path>...        print a link for each file or folder (same as sl-link)
   ls [options] [words]  list links, or only those matching every word:
+                          --kept      only kept links
                           --archived  include archived links
                           --removed   include removed ones (tombstones)
-                          --unclicked only sl-link links nobody has clicked
+                          --unclicked only links nobody has clicked that aren't kept
                           --project P only links in a project whose path contains P
                           --older N   only links made more than N days ago
                           --json      print JSON
+  keep <slug>...        keep links: they never archive, and prune leaves them
+  unkeep <slug>...      stop keeping links
+  note <slug> <text>    set a link's note (--clear removes it)
   rm <slug>...          delete links (their slugs are never given to another file)
-  mv <old> <new>        rename a link (the old address sends clicks on to the new one)
-  archive <slug>...     hide sl-link links from the lists (they still work)
+  mv <old> <new>        rename a link and keep it (the old address sends clicks on)
+  archive <slug>...     hide links from the lists (they still work)
   restore <slug>...     bring archived links back
   copy <slug>           copy a link to the clipboard (--markdown for [name](link))
-  manage                open the manage page in your browser
-  prune [-n]            remove sl-link's links whose file is gone (-n: just list them)
+  manage                open the manage page in your browser (--print: print its address)
+  prune [-n]            remove links that aren't kept whose file is gone (-n: just list them)
+  export                print every link as text: slug = target | phone page
+  import [file]         add the links in a file (or stdin) in export's format, kept
   swiftbar [--nested]   print the SwiftBar menu (see README)
 
 The commands run on the hub Mac and use its token in ~/.config/shortlinker/token.
@@ -53,6 +62,16 @@ func runCommand(args []string) (int, bool) {
 		return runList(rest, os.Stdout), true
 	case "rm":
 		return runRemove(rest), true
+	case "keep":
+		return runKeep(rest, true), true
+	case "unkeep":
+		return runKeep(rest, false), true
+	case "note":
+		return runNote(rest), true
+	case "export":
+		return runExport(rest, os.Stdout), true
+	case "import":
+		return runImport(rest, os.Stdin), true
 	case "archive":
 		return runArchive(rest, true), true
 	case "restore":
@@ -126,12 +145,12 @@ func (d linkDetails) matches(words []string) bool {
 }
 
 func runList(args []string, out io.Writer) int {
-	var asJSON, unclicked bool
+	var asJSON, unclicked, keptOnly bool
 	var project, extra string
 	olderDays := -1
 	var words []string
 	usage := func() int {
-		fmt.Fprintln(os.Stderr, "usage: shortlinker ls [--archived] [--removed] [--unclicked] [--project P] [--older DAYS] [--json] [words...]")
+		fmt.Fprintln(os.Stderr, "usage: shortlinker ls [--kept] [--archived] [--removed] [--unclicked] [--project P] [--older DAYS] [--json] [words...]")
 		return exitError
 	}
 	for i := 0; i < len(args); i++ {
@@ -144,6 +163,8 @@ func runList(args []string, out io.Writer) int {
 			extra += "&removed=1"
 		case "--unclicked":
 			unclicked = true
+		case "--kept":
+			keptOnly = true
 		case "--project", "--older":
 			if i+1 == len(args) {
 				return usage()
@@ -178,7 +199,8 @@ func runList(args []string, out io.Writer) int {
 	for _, d := range l.Links {
 		switch {
 		case !d.matches(words):
-		case unclicked && (d.Source != "sl-link" || d.Clicks > 0):
+		case unclicked && (d.Kept || d.Clicks > 0):
+		case keptOnly && !d.Kept:
 		case project != "" && !strings.Contains(strings.ToLower(d.Project), project):
 		case olderDays >= 0 && (d.Created == nil || d.Created.After(cutoff)):
 		default:
@@ -194,8 +216,8 @@ func runList(args []string, out io.Writer) int {
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	for _, d := range found {
 		note := ""
-		if d.Source == "sl-link" {
-			note = "sl-link"
+		if d.Kept {
+			note = "kept"
 		}
 		if d.Kind == "missing" {
 			note = strings.TrimSpace(note + " missing")
@@ -209,7 +231,10 @@ func runList(args []string, out io.Writer) int {
 		if d.Clicks > 0 {
 			note = strings.TrimSpace(note + " " + plural(d.Clicks, "click"))
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", d.Slug, d.Target, note)
+		if d.Note != "" {
+			note = strings.TrimSpace(note + " · " + d.Note)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", printable(d.Slug), printable(d.Target), printable(note))
 	}
 	tw.Flush()
 	return exitOK
@@ -226,7 +251,7 @@ func runArchive(args []string, archived bool) int {
 		return code
 	}
 	for _, slug := range args {
-		if err := a.do(http.MethodPost, "/api/links/"+slug+"/archive", map[string]bool{"archived": archived}, nil); err != nil {
+		if err := a.do(http.MethodPost, linkPath(slug, "archive"), map[string]bool{"archived": archived}, nil); err != nil {
 			code = maxExit(code, exitFor(name, err))
 			continue
 		}
@@ -245,7 +270,7 @@ func runRemove(args []string) int {
 		return code
 	}
 	for _, slug := range args {
-		if err := a.do(http.MethodDelete, "/api/links/"+slug, nil, nil); err != nil {
+		if err := a.do(http.MethodDelete, linkPath(slug, ""), nil, nil); err != nil {
 			code = maxExit(code, exitFor("rm", err))
 			continue
 		}
@@ -263,10 +288,10 @@ func runRename(args []string) int {
 	if code != exitOK {
 		return code
 	}
-	if err := a.do(http.MethodPost, "/api/links/"+args[0]+"/rename", map[string]string{"to": args[1]}, nil); err != nil {
+	if err := a.do(http.MethodPost, linkPath(args[0], "rename"), map[string]string{"to": args[1]}, nil); err != nil {
 		return exitFor("mv", err)
 	}
-	fmt.Printf("renamed %s to %s; links to %s send clicks on to it\n", args[0], args[1], args[0])
+	fmt.Printf("renamed %s to %s, and kept it; links to %s send clicks on to it\n", args[0], args[1], args[0])
 	return exitOK
 }
 
@@ -316,16 +341,186 @@ func runCopy(args []string) int {
 		name = nameOf(found.Target)
 	}
 	if markdown {
-		text = markdownLink(name, text)
+		text = markdownLink(printable(name), text)
 	}
 	if err := copyToClipboard(text); err != nil {
 		return exitFor("copy", err)
 	}
-	fmt.Println(text)
+	fmt.Println(printable(text))
 	if notify {
-		notifyUser("Link copied", name)
+		notifyUser("Link copied", printable(name))
 	}
 	return exitOK
+}
+
+// linkPath is the API path of a link, or of one of its actions.
+func linkPath(slug, action string) string {
+	p := "/api/links/" + url.PathEscape(slug)
+	if action != "" {
+		p += "/" + action
+	}
+	return p
+}
+
+// printable shows control characters as \x1b and the like. File names can
+// hold them, and printed raw they can drive the terminal: retitle the
+// window, or write the clipboard (OSC 52).
+func printable(s string) string {
+	if strings.IndexFunc(s, unicode.IsControl) < 0 {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			fmt.Fprintf(&b, "\\x%02x", r)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func runKeep(args []string, kept bool) int {
+	name := map[bool]string{true: "keep", false: "unkeep"}[kept]
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "usage: shortlinker %s <slug>...\n", name)
+		return exitError
+	}
+	a, _, code := commandAPI(name, 5*time.Second)
+	if code != exitOK {
+		return code
+	}
+	for _, slug := range args {
+		if err := a.do(http.MethodPost, linkPath(slug, "keep"), map[string]bool{"kept": kept}, nil); err != nil {
+			code = maxExit(code, exitFor(name, err))
+			continue
+		}
+		if kept {
+			fmt.Println("kept", slug)
+		} else {
+			fmt.Println("stopped keeping", slug, "(it archives if nobody uses it)")
+		}
+	}
+	return code
+}
+
+func runNote(args []string) int {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: shortlinker note <slug> <text...> | --clear")
+		return exitError
+	}
+	note := strings.Join(args[1:], " ")
+	if note == "--clear" {
+		note = ""
+	}
+	a, _, code := commandAPI("note", 5*time.Second)
+	if code != exitOK {
+		return code
+	}
+	if err := a.do(http.MethodPost, linkPath(args[0], "note"), map[string]string{"note": note}, nil); err != nil {
+		return exitFor("note", err)
+	}
+	return exitOK
+}
+
+// runExport prints every link that isn't removed, kept ones first, in the
+// text format import reads. A link's note goes on a comment line above it,
+// which import reads back as its note.
+func runExport(args []string, out io.Writer) int {
+	if len(args) > 0 {
+		fmt.Fprintln(os.Stderr, "usage: shortlinker export > links.txt")
+		return exitError
+	}
+	a, _, code := commandAPI("export", 10*time.Second)
+	if code != exitOK {
+		return code
+	}
+	l, err := fetchListingWith(a, "&archived=1")
+	if err != nil {
+		return exitFor("export", err)
+	}
+	fmt.Fprintf(out, "# shortlinker links, exported %s. `shortlinker import` reads this back.\n", time.Now().Format("2006-01-02"))
+	section := ""
+	for _, d := range l.Links {
+		if s := map[bool]string{true: "Kept", false: "Not kept (import keeps them)"}[d.Kept]; s != section {
+			fmt.Fprintf(out, "\n# %s\n\n", s)
+			section = s
+		}
+		if strings.IndexFunc(d.Target+d.Phone, unicode.IsControl) >= 0 {
+			fmt.Fprintf(os.Stderr, "shortlinker export: skipping %s: its target has a control character, which the text format can't hold\n", d.Slug)
+			code = exitError
+			continue
+		}
+		if d.Note != "" {
+			fmt.Fprintln(out, "# "+d.Note)
+		}
+		fmt.Fprintln(out, formatLine(d.Slug, d.Target, d.Phone))
+	}
+	return code
+}
+
+// runImport adds the links in a file (or stdin) in export's format, as kept
+// links. A slug that's already in use, even by a removed link, is left as
+// it is and reported.
+func runImport(args []string, stdin io.Reader) int {
+	var in io.Reader = stdin
+	switch {
+	case len(args) > 1:
+		fmt.Fprintln(os.Stderr, "usage: shortlinker import [file]")
+		return exitError
+	case len(args) == 1 && args[0] != "-":
+		f, err := os.Open(args[0])
+		if err != nil {
+			return exitFor("import", err)
+		}
+		defer f.Close()
+		in = f
+	}
+	data, err := io.ReadAll(io.LimitReader(in, 16<<20))
+	if err != nil {
+		return exitFor("import", err)
+	}
+	text := string(data)
+	entries, warnings := parseEntries(text)
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "shortlinker import:", w)
+	}
+	notes := commentNotes(strings.Split(text, "\n"))
+	a, _, code := commandAPI("import", 10*time.Second)
+	if code != exitOK {
+		return code
+	}
+	l, err := fetchListingWith(a, "&archived=1&removed=1")
+	if err != nil {
+		return exitFor("import", err)
+	}
+	have := map[string]linkDetails{}
+	for _, d := range l.Links {
+		have[d.Slug] = d
+	}
+	added, same, taken := 0, 0, 0
+	for _, e := range entries {
+		if d, ok := have[e.Slug]; ok {
+			if d.Removed == nil && d.Target == e.Target {
+				same++
+			} else {
+				taken++
+				fmt.Fprintf(os.Stderr, "shortlinker import: %s is already in use, so it's left as it is\n", e.Slug)
+			}
+			continue
+		}
+		body := map[string]string{"slug": e.Slug, "target": e.Target, "phone": e.Phone, "note": notes[e.Slug], "origin": "import"}
+		if err := a.do(http.MethodPost, "/api/links", body, nil); err != nil {
+			code = maxExit(code, exitFor("import", fmt.Errorf("%s: %w", e.Slug, err)))
+			continue
+		}
+		added++
+	}
+	fmt.Printf("added %d, already there %d, slug in use %d\n", added, same, taken)
+	if taken > 0 {
+		code = maxExit(code, exitError)
+	}
+	return code
 }
 
 func runManage(args []string) int {
@@ -334,25 +529,66 @@ func runManage(args []string) int {
 		return code
 	}
 	var reply struct {
-		URL string `json:"url"`
+		Code string `json:"code"`
 	}
 	if err := a.do(http.MethodPost, "/api/manage-code", struct{}{}, &reply); err != nil {
 		return exitFor("manage", err)
 	}
+	page, err := managePageURL(a.base, reply.Code)
+	if err != nil {
+		return exitFor("manage", err)
+	}
 	if len(args) > 0 && args[0] == "--print" {
-		fmt.Println(reply.URL)
+		fmt.Println(page)
 		return exitOK
 	}
-	if out, err := exec.Command("/usr/bin/open", reply.URL).CombinedOutput(); err != nil {
-		return exitFor("manage", fmt.Errorf("open: %v: %s", err, strings.TrimSpace(string(out))))
+	if err := openURL(page); err != nil {
+		return exitFor("manage", fmt.Errorf("%v (shortlinker manage --print prints the address to open yourself)", err))
 	}
 	return exitOK
 }
 
+// managePageURL is the manage page's address with a one-time code, on the
+// API's own port. It's built here rather than taken from the reply, so
+// nothing else on the port can choose what gets opened.
+func managePageURL(apiBase, code string) (string, error) {
+	if _, err := hex.DecodeString(code); err != nil || len(code) < 32 || len(code) > 128 {
+		return "", fmt.Errorf("the hub sent a code that isn't one")
+	}
+	u, err := url.Parse(apiBase)
+	if err != nil || u.Port() == "" {
+		return "", fmt.Errorf("can't tell the API's port from %q", apiBase)
+	}
+	return "http://localhost:" + u.Port() + "/manage#code=" + code, nil
+}
+
+// openURL opens a URL in the default browser. The URL goes to osascript on
+// stdin, not as an argument: every account on the Mac can read every
+// process's arguments (ps), and the manage page's URL holds a code that's
+// as good as a 12-hour session to whoever uses it first. Tests replace it.
+var openURL = func(u string) error {
+	cmd := openURLCommand(u)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("opening the browser: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func openURLCommand(u string) *exec.Cmd {
+	cmd := exec.Command("/usr/bin/osascript", "-")
+	cmd.Stdin = strings.NewReader("open location " + appleScriptString(u) + "\n")
+	return cmd
+}
+
+func appleScriptString(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+}
+
 const pruneUsage = `usage: shortlinker prune [-n]
 
-Removes links that sl-link made whose file or folder no longer exists, and
-prints their slugs. Your own links are never touched. -n only lists them.
+Removes links whose file or folder no longer exists, and prints their
+slugs. Kept links are never touched. -n only lists them. Removed links stay
+as tombstones, so their slugs are never given to another file.
 `
 
 // runPrune is the `shortlinker prune` entry point.
