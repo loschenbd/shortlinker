@@ -1,0 +1,1647 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>shortlinker</title>
+<!--
+  The manage page. The hub serves it at http://localhost:7778/manage only;
+  port 7778 is never published to the tailnet. CSP:
+    default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline';
+    connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'
+  So: no external fonts, images, scripts or iframes. Icons are inline SVG,
+  and fetch() only goes to relative paths on this origin.
+
+  Link data reaches the DOM only through textContent and createElement, never
+  as HTML. An <a href> is made from a target only when new URL(target) is
+  http: or https:; anything else opens through the short link instead.
+  This file holds no backtick characters.
+-->
+<style>
+:root {
+  --bg: #fafaf9; --panel: #ffffff; --sunk: #f5f4f1; --ink: #1c1c1a; --muted: #6b6a66; --faint: #8f8d88;
+  --line: #e7e5e1; --line-strong: #d3d1cc; --hover: #f6f5f2; --tag: #efeeea;
+  --accent: #2f5fd0; --accent-ink: #ffffff; --accent-bg: #edf2fd; --accent-line: #c8d5f4;
+  --warn: #a4471d; --warn-bg: #fbeee6;
+  --dev0: #2f5fd0; --dev1: #13856b; --dev2: #b06a00; --dev3: #8a4fc4; --devx: #9c9a95;
+  --focus: rgba(47, 95, 208, .35); --scrim: rgba(28, 28, 26, .28); --shadow: rgba(28, 28, 26, .14);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --panel: #1e1e1c; --sunk: #191918; --ink: #ecebe8; --muted: #a3a19c; --faint: #807e79;
+    --line: #2e2d2a; --line-strong: #44423e; --hover: #242422; --tag: #2a2927;
+    --accent: #7fa2ff; --accent-ink: #10131a; --accent-bg: #1d2438; --accent-line: #34416b;
+    --warn: #f0a07a; --warn-bg: #3a2419;
+    --dev0: #7fa2ff; --dev1: #4cc4a2; --dev2: #e2a64c; --dev3: #bb93ee; --devx: #75736e;
+    --focus: rgba(127, 162, 255, .4); --scrim: rgba(0, 0, 0, .55); --shadow: rgba(0, 0, 0, .5);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+html.locked { overflow: hidden; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+.mono, .slug, code, kbd, .r-target, .sib, dialog input.mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+main { max-width: 1120px; margin: 0 auto; padding: 20px 16px 56px; }
+
+button, a.btn { font: inherit; color: var(--ink); cursor: pointer; border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 6px 10px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; line-height: 1.2; text-decoration: none; }
+button:hover, a.btn:hover { background: var(--hover); }
+a.btn:focus-visible, a.d-url:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus); border-color: var(--accent); border-radius: 7px; }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+button.primary:hover { background: var(--accent); filter: brightness(1.07); }
+button.danger { color: var(--warn); }
+button.danger-solid { background: var(--warn); border-color: var(--warn); color: var(--panel); font-weight: 600; }
+button.danger-solid:hover { background: var(--warn); filter: brightness(1.07); }
+button.quiet { background: none; border-color: transparent; color: var(--muted); }
+button.quiet:hover { background: var(--hover); color: var(--ink); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus); border-color: var(--accent); }
+svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Header */
+.top { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.brand { flex: 1; min-width: 0; }
+.brand h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -.01em; line-height: 1.25; }
+.brand .hub { display: block; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.until { font-size: 12.5px; color: var(--faint); white-space: nowrap; }
+@media (max-width: 599px) { .until { display: none; } }
+
+/* Sign-in gate */
+.gate { padding: 56px 20px 60px; text-align: center; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+.gate h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; color: var(--ink); }
+.gate p { margin: 0 auto; max-width: 46ch; }
+.gate code { background: var(--tag); color: var(--ink); padding: 2px 6px; border-radius: 5px; font-size: 12.5px; }
+.signing { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); }
+.spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Overview strip: one panel, hairlines between cells */
+.overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin: 0 0 20px; }
+.ov { background: var(--panel); padding: 12px 14px 14px; min-width: 0; display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 0; text-align: left; border: 0; border-radius: 0; color: var(--ink); font-size: 13px; line-height: 1.4; }
+button.ov:hover { background: var(--hover); }
+.ov-num { display: block; font-size: 22px; font-weight: 600; letter-spacing: -.02em; line-height: 1.15; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.ov-label { display: block; margin-top: 1px; font-size: 12.5px; color: var(--muted); }
+.ov-sub { display: block; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.ov.warn .ov-num { color: var(--warn); }
+.ov-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.ov-acts button { padding: 4px 9px; font-size: 12.5px; }
+.ov-safe { display: block; margin-top: 8px; font-size: 11.5px; color: var(--muted); }
+.ov-link { margin-top: 8px; padding: 0; border: 0; background: none; color: var(--warn); font-size: 12px; text-align: left; justify-content: flex-start; text-decoration: underline; text-underline-offset: 2px; }
+.ov-link:hover { background: none; }
+.week { display: flex; align-items: flex-end; gap: 3px; height: 30px; margin-top: 10px; }
+.week .day { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; gap: 1px; }
+.week .day span { display: block; border-radius: 2px; }
+.week .u { background: var(--accent-line); }
+.week .c { background: var(--accent); }
+.week .z { height: 2px; background: var(--line-strong); }
+.split { display: flex; height: 6px; margin-top: 10px; border-radius: 3px; overflow: hidden; background: var(--line-strong); }
+.split span { display: block; height: 100%; background: var(--accent); }
+.stack { display: flex; gap: 2px; height: 6px; margin-top: 10px; border-radius: 3px; overflow: hidden; background: var(--tag); }
+.stack span { display: block; height: 100%; }
+.dv0 { background: var(--dev0); } .dv1 { background: var(--dev1); } .dv2 { background: var(--dev2); } .dv3 { background: var(--dev3); } .dvx { background: var(--devx); }
+.tx0 { color: var(--dev0); } .tx1 { color: var(--dev1); } .tx2 { color: var(--dev2); } .tx3 { color: var(--dev3); } .txx { color: var(--devx); }
+.legend, .refs { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 3px; font-size: 12.5px; }
+.legend li, .refs li { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.legend .sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.legend .nm, .refs .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.legend .n, .refs .n { margin-left: auto; padding-left: 6px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.refs li { position: relative; padding: 1px 0 4px; }
+.refs .bar { position: absolute; left: 0; bottom: 0; height: 2px; border-radius: 1px; background: var(--accent-line); }
+.refs li.none .nm { color: var(--muted); }
+@media (min-width: 720px) { .overview { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 1040px) { .overview { grid-template-columns: .85fr 1fr .95fr 1.2fr 1.15fr 1.1fr; } }
+
+/* Search and filters */
+.controls { display: grid; gap: 10px; margin-bottom: 12px; }
+.search-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.search { position: relative; flex: 1 1 100%; min-width: 0; display: flex; align-items: center; }
+.search svg { position: absolute; left: 11px; color: var(--faint); pointer-events: none; }
+#q { width: 100%; min-width: 0; font: inherit; font-size: 15px; padding: 9px 12px 9px 35px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--ink); }
+#q::placeholder { color: var(--faint); }
+.select { position: relative; flex: 1 1 0; min-width: 0; display: flex; align-items: center; }
+.select select { width: 100%; min-width: 0; -webkit-appearance: none; appearance: none; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 9px 30px 9px 11px; cursor: pointer; }
+.select svg { position: absolute; right: 9px; color: var(--muted); pointer-events: none; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border-radius: 999px; padding: 5px 11px; font-size: 13px; color: var(--muted); gap: 5px; }
+.chip .ct { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.chip[aria-pressed="true"] { background: var(--accent-bg); border-color: var(--accent-line); color: var(--accent); font-weight: 600; }
+.chip[aria-pressed="true"] .ct { color: var(--accent); }
+@media (min-width: 720px) {
+  .search { flex: 1 1 280px; }
+  .select { flex: 0 0 auto; }
+  .select select { width: auto; min-width: 150px; }
+}
+.viewnote { margin: 0 2px 12px; max-width: 80ch; font-size: 13px; color: var(--muted); }
+
+/* Link list */
+.list { list-style: none; margin: 0; padding: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.row { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "main" "act" "acts"; gap: 10px 20px; padding: 12px 14px; border-top: 1px solid var(--line); cursor: pointer; }
+.row:first-child { border-top: 0; }
+.row:hover { background: var(--hover); }
+.row.is-open { background: var(--accent-bg); }
+.r-main { grid-area: main; display: block; width: 100%; min-width: 0; padding: 0; border: 0; border-radius: 4px; background: none; color: inherit; text-align: left; }
+.r-main:hover { background: none; }
+.r-top { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 7px; }
+.r-kind { color: var(--muted); }
+.slug { font-size: 13.5px; font-weight: 600; line-height: 1.3; word-break: break-all; }
+.tag { padding: 3px 6px; border-radius: 5px; background: var(--tag); color: var(--muted); font: 500 11px/1 -apple-system, BlinkMacSystemFont, sans-serif; white-space: nowrap; }
+.tag.kept { background: var(--accent-bg); color: var(--accent); }
+.tag.warn { background: var(--warn-bg); color: var(--warn); }
+.r-target { display: flex; min-width: 0; margin-top: 3px; font-size: 12.5px; line-height: 1.4; }
+.r-target .dir { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); }
+.r-target .base { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.r-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 7px; font-size: 12.5px; color: var(--muted); }
+.proj { padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); font-weight: 500; }
+.note { min-width: 0; color: var(--ink); overflow-wrap: anywhere; }
+.made { color: var(--faint); }
+.r-act { grid-area: act; min-width: 0; font-size: 12.5px; color: var(--muted); }
+.r-clicks b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.meter { height: 4px; margin: 8px 0 5px; border-radius: 2px; background: var(--tag); overflow: hidden; }
+.meter span { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
+.meter.soon span { background: var(--warn); }
+.r-ret { margin-top: 2px; }
+.r-ret.warn { color: var(--warn); }
+.ip { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .95em; }
+.r-acts { grid-area: acts; display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.r-acts button, .r-acts a.btn { position: relative; padding: 6px 9px; font-size: 13px; color: var(--muted); }
+.r-acts button:hover, .r-acts a.btn:hover { color: var(--ink); }
+.r-acts button.danger { color: var(--warn); }
+@media (hover: hover) {
+  .r-acts button, .r-acts a.btn { border-color: transparent; background: transparent; }
+  .row:hover .r-acts button, .row:focus-within .r-acts button, .row:hover .r-acts a.btn, .row:focus-within .r-acts a.btn { border-color: var(--line); background: var(--panel); }
+}
+@media (max-width: 719px) {
+  .r-acts .lbl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  .r-acts .copy .lbl { position: static; width: auto; height: auto; overflow: visible; clip: auto; clip-path: none; }
+  .r-acts button, .r-acts a.btn { padding: 8px 10px; }
+}
+@media (min-width: 720px) {
+  .row { grid-template-columns: minmax(0, 1fr) 220px; grid-template-areas: "main act" "acts act"; }
+  .r-acts svg { display: none; }
+}
+@media (min-width: 1080px) {
+  .row { grid-template-columns: minmax(0, 1fr) 200px auto; grid-template-areas: "main act acts"; align-items: start; }
+  .r-acts { flex-wrap: nowrap; justify-content: flex-end; }
+}
+.row.tomb .slug { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--faint); }
+.row.tomb .r-target .dir, .row.tomb .r-target .base { color: var(--faint); }
+.row.arch .slug { color: var(--muted); }
+.extra { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 2px 0; font-size: 13px; color: var(--muted); }
+.extra button { padding: 3px 9px; font-size: 12.5px; }
+
+/* Empty and "nothing matches" */
+.state { padding: 44px 20px 48px; text-align: center; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+.state .big { width: 28px; height: 28px; margin-bottom: 10px; color: var(--faint); stroke-width: 1.5; }
+.state h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.state p { margin: 0 auto 16px; max-width: 50ch; }
+.state code { display: inline-block; max-width: 100%; margin-bottom: 16px; padding: 7px 11px; border-radius: 7px; background: var(--tag); color: var(--ink); font-size: 13px; overflow-wrap: anywhere; }
+.state .acts { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+
+.hint { margin: 12px 2px 0; font-size: 12px; color: var(--faint); }
+kbd { font-size: 11px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; color: var(--muted); }
+@media (hover: none) { .hint { display: none; } }
+
+/* Detail drawer: a side panel, or the whole window when it is narrow */
+.scrim { position: fixed; inset: 0; z-index: 20; background: var(--scrim); opacity: 0; transition: opacity .2s ease; }
+.scrim.open { opacity: 1; }
+.drawer { position: fixed; z-index: 21; top: 0; right: 0; bottom: 0; width: min(500px, 100%); display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -16px 0 40px var(--shadow); transform: translateX(104%); transition: transform .24s cubic-bezier(.2, .8, .2, 1); }
+.drawer.open { transform: none; }
+.d-head { display: flex; align-items: flex-start; gap: 8px; padding: 14px 12px 12px 16px; border-bottom: 1px solid var(--line); }
+.d-titles { flex: 1; min-width: 0; padding-top: 3px; }
+.d-slug { margin: 0; font-size: 17px; font-weight: 600; line-height: 1.3; word-break: break-all; }
+.d-slug:focus { outline: none; }
+.d-url { display: block; margin-top: 2px; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; text-decoration: none; }
+a.d-url[href]:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+dl.rec dd a { color: var(--accent); text-decoration: none; }
+dl.rec dd a:hover { text-decoration: underline; text-underline-offset: 2px; }
+.d-nav { display: flex; align-items: center; gap: 2px; flex: none; }
+.d-nav #d-copy { margin-right: 4px; }
+.icon-btn { padding: 7px; border-color: transparent; background: none; color: var(--muted); }
+.icon-btn:hover { color: var(--ink); }
+.d-body { flex: 1; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 0 16px 32px; }
+.d-sec { padding: 16px 0; border-top: 1px solid var(--line); }
+.d-sec:first-child { border-top: 0; }
+.d-sec h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; font-size: 13px; font-weight: 600; }
+.d-sec h3 .ct { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.d-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
+.d-ret { margin: 0; font-size: 14px; }
+.d-ret.warn { color: var(--warn); }
+.d-note { margin: 8px 0 0; font-size: 12.5px; color: var(--muted); }
+.d-sub { margin: 14px 0 0; font-size: 12.5px; color: var(--muted); }
+.d-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
+.d-acts button, .d-acts a.btn { font-size: 13px; }
+.noteed { display: flex; gap: 6px; margin: 0 0 12px; }
+.noteed input { flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--ink); font: inherit; font-size: 13.5px; }
+.noteed input::placeholder { color: var(--faint); }
+.keep { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-top: 16px; padding: 11px 12px; border: 1px solid var(--accent-line); border-radius: 10px; background: var(--accent-bg); }
+.keep p { flex: 1 1 220px; margin: 0; font-size: 12.5px; color: var(--muted); }
+dl.rec { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 7px 12px; margin: 0; font-size: 13px; }
+dl.rec dt { color: var(--muted); }
+dl.rec dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+dl.rec dd.mono { font-size: 12.5px; }
+dl.rec dd.none { color: var(--faint); }
+.cmd { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--sunk); }
+.cmd > svg { color: var(--muted); }
+.cmd code { flex: 1; min-width: 0; font-size: 12.5px; overflow-wrap: anywhere; }
+.sibs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.sib { padding: 3px 8px; border-radius: 6px; font-size: 12px; color: var(--muted); }
+.sib.gone { text-decoration: line-through; }
+.hist { list-style: none; margin: 0; padding: 0; }
+.hist li { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 2px 12px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.hist li:first-child { border-top: 0; padding-top: 0; }
+.h-when { color: var(--muted); font-variant-numeric: tabular-nums; }
+.h-dev { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.h-client { padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; font-size: 11px; color: var(--muted); }
+.h-sub { display: block; font-size: 12.5px; color: var(--muted); }
+
+/* Lifeline: made, clicks, today, archive date */
+.life { margin: 30px 8px 0; }
+.lt { position: relative; height: 18px; }
+.lt-line { position: absolute; left: 0; right: 0; top: 8px; border-top: 2px dotted var(--line-strong); }
+.lt-past { position: absolute; left: 0; top: 8px; height: 2px; border-radius: 1px; background: var(--muted); }
+.mk { position: absolute; top: 9px; display: block; transform: translate(-50%, -50%); }
+.mk-click { width: 3px; height: 16px; border-radius: 2px; }
+.mk-made { width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--muted); background: var(--panel); }
+.mk-relink { width: 8px; height: 8px; background: var(--muted); transform: translate(-50%, -50%) rotate(45deg); }
+.mk-end { width: 11px; height: 11px; border-radius: 3px; border: 2px solid var(--accent); background: var(--panel); }
+.mk-end.soon { border-color: var(--warn); }
+.mk-arch { width: 11px; height: 11px; border-radius: 3px; background: var(--muted); }
+.mk-rm { width: 11px; height: 11px; border-radius: 3px; background: var(--warn); }
+.mk-now { position: absolute; top: -8px; bottom: -2px; width: 0; border-left: 1px solid var(--accent); }
+.mk-now-l { position: absolute; top: -25px; font-size: 11px; color: var(--accent); white-space: nowrap; transform: translateX(-50%); }
+.mk-now-l.l { transform: translateX(-2px); }
+.mk-now-l.r { transform: translateX(calc(-100% + 2px)); }
+.life-labels { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.life-key { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 10px; font-size: 11.5px; color: var(--muted); }
+.life-key span { display: inline-flex; align-items: center; gap: 5px; }
+.k { display: inline-block; flex: none; }
+.k-click { width: 3px; height: 11px; border-radius: 2px; }
+.k-made { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--muted); }
+.k-relink { width: 7px; height: 7px; background: var(--muted); transform: rotate(45deg); }
+.k-end { width: 9px; height: 9px; border-radius: 2px; border: 2px solid var(--accent); }
+.k-end.soon { border-color: var(--warn); }
+.k-arch { width: 9px; height: 9px; border-radius: 2px; background: var(--muted); }
+.k-rm { width: 9px; height: 9px; border-radius: 2px; background: var(--warn); }
+@media (max-width: 639px) {
+  .drawer { width: 100%; border-left: 0; box-shadow: none; transform: translateY(100%); }
+  .drawer.open { transform: none; }
+  .hist li { grid-template-columns: minmax(0, 1fr); }
+  dl.rec { grid-template-columns: 92px minmax(0, 1fr); }
+}
+
+/* Toast and dialogs */
+.toast { position: fixed; z-index: 40; left: 50%; bottom: 20px; display: flex; align-items: center; gap: 10px; width: max-content; max-width: calc(100% - 32px); padding: 9px 14px; border-radius: 9px; background: var(--ink); color: var(--bg); font-size: 13.5px; box-shadow: 0 8px 24px var(--shadow); opacity: 0; pointer-events: none; transform: translate(-50%, 8px); transition: opacity .15s ease, transform .15s ease; }
+.toast.show { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); }
+.toast .t-act { flex: none; padding: 2px 4px; border: 0; background: none; color: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.toast .t-act:hover { background: none; }
+dialog { width: min(520px, calc(100% - 32px)); padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); box-shadow: 0 20px 50px var(--shadow); }
+dialog::backdrop { background: rgba(0, 0, 0, .35); }
+dialog h2 { margin: 0 0 8px; font-size: 16px; overflow-wrap: anywhere; }
+dialog p { margin: 0; font-size: 13.5px; color: var(--muted); }
+dialog label { display: block; margin: 14px 0 4px; font-size: 12.5px; font-weight: 500; color: var(--muted); }
+dialog input { width: 100%; font-family: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--ink); font-size: 13px; }
+dialog .help { margin-top: 4px; font-size: 12px; color: var(--faint); }
+dialog .msg { min-height: 1.3em; margin-top: 14px; font-size: 12.5px; color: var(--muted); }
+dialog .msg.err { color: var(--warn); }
+.dlg-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.c-list { margin: 12px 0 0; padding: 0; list-style: none; max-height: 160px; overflow: auto; font-size: 12.5px; color: var(--ink); }
+.c-list li { padding: 2px 0; overflow-wrap: anywhere; }
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer, .scrim, .toast { transition: none; }
+  .spin { animation: none; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <div class="brand"><h1>shortlinker</h1><span class="hub mono" id="hub-host"></span></div>
+    <span class="until" id="until" hidden></span>
+    <button id="new" class="primary" type="button" hidden><span data-icon="plus"></span>New link</button>
+  </header>
+
+  <div id="gate" class="gate" hidden>
+    <div id="gate-signing" hidden><span class="signing"><span class="spin" aria-hidden="true"></span>Signing in…</span></div>
+    <div id="gate-locked" hidden>
+      <h2>Session expired or link already used</h2>
+      <p>Run <code>shortlinker manage</code> to open this page, or choose <b>Manage links</b> in the menu bar.</p>
+    </div>
+  </div>
+
+  <div id="app" hidden>
+    <section id="overview" class="overview" aria-label="Overview"></section>
+    <div class="controls" id="controls">
+      <div class="search-row">
+        <label class="search"><span data-icon="search"></span><span class="sr">Search links</span><input id="q" type="search" placeholder="Search slugs, paths, notes, projects, sessions" autocomplete="off" spellcheck="false" autocapitalize="off"></label>
+        <label class="select"><span class="sr">Project</span><select id="project"></select><span data-icon="down"></span></label>
+        <label class="select"><span class="sr">Sort</span><select id="sort"><option value="newest">Newest first</option><option value="clicks">Most clicked</option><option value="last">Last clicked</option></select><span data-icon="down"></span></label>
+      </div>
+      <div class="chips" id="chips" role="group" aria-label="Show"></div>
+    </div>
+    <p id="viewnote" class="viewnote" hidden></p>
+    <ul id="list" class="list" aria-label="Links"></ul>
+    <div id="state" class="state" hidden></div>
+    <div id="extra" class="extra" hidden></div>
+    <p class="hint" id="hint"><kbd>/</kbd> search &nbsp; <kbd>Enter</kbd> copies the first link &nbsp; <kbd>Esc</kbd> clears or closes</p>
+  </div>
+</main>
+
+<div id="scrim" class="scrim" hidden></div>
+<aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title" hidden>
+  <div class="d-head">
+    <div class="d-titles"><h2 id="d-title" class="d-slug mono" tabindex="-1"></h2><a id="d-url" class="d-url mono" target="_blank" rel="noopener noreferrer"></a></div>
+    <div class="d-nav">
+      <button type="button" id="d-copy" title="Copy the link"><span data-icon="copy"></span>Copy</button>
+      <button type="button" id="d-prev" class="icon-btn" aria-label="Previous link" title="Previous link"><span data-icon="up"></span></button>
+      <button type="button" id="d-next" class="icon-btn" aria-label="Next link" title="Next link"><span data-icon="down"></span></button>
+      <button type="button" id="d-close" class="icon-btn" aria-label="Close" title="Close (Esc)"><span data-icon="close"></span></button>
+    </div>
+  </div>
+  <div id="d-body" class="d-body"></div>
+</aside>
+
+<dialog id="edit" aria-labelledby="e-title">
+  <form id="e-form" novalidate>
+    <h2 id="e-title">Edit link</h2>
+    <label for="e-slug">Slug</label>
+    <input id="e-slug" class="mono" autocomplete="off" spellcheck="false" autocapitalize="off">
+    <p class="help">Lowercase letters, digits and hyphens.</p>
+    <label for="e-target">Target</label>
+    <input id="e-target" class="mono" autocomplete="off" spellcheck="false" autocapitalize="off">
+    <p class="help">A path, or a URL with ://</p>
+    <label for="e-note">Note</label>
+    <input id="e-note" maxlength="200" autocomplete="off" placeholder="Optional: why this link exists">
+    <div id="e-phone-wrap">
+      <label for="e-phone">Phone page</label>
+      <input id="e-phone" class="mono" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Optional: a URL where phones can read the file">
+    </div>
+    <p class="msg" id="e-msg" role="status"></p>
+    <div class="dlg-acts"><button type="button" id="e-cancel">Cancel</button><button type="submit" id="e-save" class="primary">Save</button></div>
+  </form>
+</dialog>
+
+<dialog id="confirm" aria-labelledby="c-title">
+  <form method="dialog">
+    <h2 id="c-title"></h2>
+    <p id="c-body"></p>
+    <ul id="c-list" class="c-list mono" hidden></ul>
+    <div class="dlg-acts"><button value="cancel">Cancel</button><button id="c-ok" value="ok" class="danger-solid"></button></div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+/*
+  API the page uses (all on this port; every call sends "Authorization: Bearer <session>",
+  and POST bodies are JSON with "Content-Type: application/json"):
+
+  POST   /api/session {"code"}                      -> {session, expires (Unix seconds)}   trades the one-time #code
+  GET    /api/links?details=1&archived=1&removed=1  -> {hub, links:[{slug, target, phone?, kind, kept,
+           origin, created, project?, session?, note?, linked, last_linked?, clicks, last_clicked?,
+           last_device?, archived?, archives_at?, removed?:{at, why, to?}}]}
+           kind: url, file, folder or missing. archives_at is set on unkept, live, unarchived links.
+  GET    /api/links/{slug}/clicks?limit=200         -> [{t, slug, device, ip, client, route, ref}], newest first
+           device: the Tailscale name, else the tailnet IP, or "local" for a click on the hub itself.
+           ref: an origin such as "https://www.notion.so". Routes "renamed" and "removed" (clicks on
+           an old or removed slug) show in the history but don't count as uses.
+  GET    /api/stats                                 -> {links, kept, archived, removed, missing, made_week,
+           never_clicked, clicks_week, clicks_month, by_device:{name:n}, by_ref:{domain:n}}
+           by_device and by_ref cover the last 30 days.
+  POST   /api/links {slug?, target, phone?, note?, origin:"manage"}   with a slug: makes or replaces a kept link
+  POST   /api/links/{slug}/rename {"to"}            keeps the link; the old slug redirects to the new one
+  POST   /api/links/{slug}/phone {"url"}            "" clears it
+  POST   /api/links/{slug}/note {"note"}            at most 200 characters
+  POST   /api/links/{slug}/keep {"kept": bool}      Keep forever / Stop keeping
+  POST   /api/links/{slug}/archive {"archived": bool}   400 for kept links; restoring restarts the clock
+  DELETE /api/links/{slug}                          leaves a tombstone
+  POST   /api/prune {"dry_run": bool}               -> {removed:[slugs], dry_run}; unkept links whose file is gone
+  GET    /o/{slug}[?reveal=1]                       opens the file on this Mac, or shows it in Finder
+  Errors come back as {"error": "..."}; a 401 means the session is gone.
+*/
+var DAY = 864e5, HOUR = 36e5;
+var NEVER_DAYS = 30, LAST_DAYS = 180; // archive 30 days after linking if never clicked, or 180 days after the last click
+var KEY = "shortlinker-session", VIEW_KEY = "shortlinker-manage-view";
+var CLICK_LIMIT = 200, NOTE_MAX = 200;
+var SVGNS = "http://www.w3.org/2000/svg";
+var RUN_EXT = ["sh", "command", "app", "pkg", "tool"];
+var TEXT_EXT = ["md", "txt", "log", "csv", "sql", "json", "yaml", "yml"];
+
+var ICONS = {
+  copy: ["M11 9h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z", "M5 15h-.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"],
+  open: ["M14 4h6v6", "M20 4l-9 9", "M19 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4"],
+  finder: ["M4 20h13.2a2 2 0 0 0 1.9-1.4l1.8-6a1.5 1.5 0 0 0-1.4-1.9H8.3a2 2 0 0 0-1.9 1.4L4 20z", "M4 20a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h4.5l2 2H17a1 1 0 0 1 1 1v2.6"],
+  edit: ["M4 20v-3L15.5 5.5a2.12 2.12 0 0 1 3 3L7 20z", "M13.5 7.5l3 3"],
+  archive: ["M3.5 4.5h17v4h-17z", "M5 8.5V18a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5", "M10 12.5h4"],
+  restore: ["M3.5 4.5h17v4h-17z", "M5 8.5V18a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5", "M12 17.5v-5", "M9.5 15l2.5-2.5 2.5 2.5"],
+  trash: ["M4 7h16", "M9 7V4.5h6V7", "M6.5 7l.8 11.2A2 2 0 0 0 9.3 20h5.4a2 2 0 0 0 2-1.8L17.5 7", "M10 11v5", "M14 11v5"],
+  file: ["M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z", "M14 3v5h5"],
+  folder: ["M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6l2 2.2h7.4A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"],
+  url: ["M10 14a4.2 4.2 0 0 0 6 0l3-3a4.2 4.2 0 0 0-6-6l-1 1", "M14 10a4.2 4.2 0 0 0-6 0l-3 3a4.2 4.2 0 0 0 6 6l1-1"],
+  gone: ["M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z", "M14 3v5h5", "M9.5 12.5l5 5", "M14.5 12.5l-5 5"],
+  search: ["M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13z", "M20 20l-4.8-4.8"],
+  close: ["M6 6l12 12", "M18 6L6 18"],
+  up: ["M6 15l6-6 6 6"],
+  down: ["M6 9l6 6 6-6"],
+  laptop: ["M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5V15H5z", "M2.5 18.5h19"],
+  phone: ["M8.5 2.5h7A1.5 1.5 0 0 1 17 4v16a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 20V4a1.5 1.5 0 0 1 1.5-1.5z", "M11 18.5h2"],
+  tablet: ["M6.5 2.5h11A1.5 1.5 0 0 1 19 4v16a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 20V4a1.5 1.5 0 0 1 1.5-1.5z", "M11 18.5h2"],
+  device: ["M4 5.5h16v10H4z", "M9 19h6", "M12 15.5V19"],
+  keep: ["M7 3.5h10a1 1 0 0 1 1 1V21l-6-4-6 4V4.5a1 1 0 0 1 1-1z"],
+  plus: ["M12 5v14", "M5 12h14"],
+  terminal: ["M4.5 4.5h15A1.5 1.5 0 0 1 21 6v12a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18V6a1.5 1.5 0 0 1 1.5-1.5z", "M7 9.5l3 2.5-3 2.5", "M12.5 15h4"],
+  details: ["M4.5 4.5h15A1.5 1.5 0 0 1 21 6v12a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18V6a1.5 1.5 0 0 1 1.5-1.5z", "M15 4.5v15"],
+  prune: ["M6 3.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5z", "M6 15.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5z", "M8.2 7.2L20 17", "M8.2 16.8L20 7"]
+};
+
+var ROUTE_TEXT = {
+  open: "Opened on the Mac", finder: "Showed in Finder", "phone-page": "Opened the phone page",
+  serve: "Showed the file", redirect: "Went to the URL", missing: "Said the file no longer exists", unknown: "No such link",
+  renamed: "Came in on the old name and went on to the new one", removed: "Hit the tombstone: said the link was removed"
+};
+var UNCOUNTED = { renamed: 1, removed: 1 };
+var ORIGIN_TEXT = {
+  "sl-link": "sl-link, run by an agent", finder: "Link Finder selection, in the menu bar",
+  api: "The link API", manage: "This page", "import": "Imported from the old links files"
+};
+var ORIGIN_SHORT = { "sl-link": "via sl-link", finder: "from Finder", api: "via the API", manage: "on this page" };
+var NO_SESSION = {
+  finder: "None. It was made from the Finder selection in the menu bar.",
+  api: "None. The API call didn’t come from an agent session.",
+  manage: "None. It was made on this page.",
+  "import": "None. It was imported from the old links files."
+};
+var WHY = { pruned: "pruned: the file no longer exists", deleted: "deleted by you", renamed: "renamed" };
+
+var FILTERS = {
+  all:      { label: "All",           where: "your list",           test: function (l) { return !l.removed && !l.archived; } },
+  kept:     { label: "Kept",          where: "kept links",          test: function (l) { return !l.removed && l.kept; } },
+  never:   { label: "Never clicked", where: "never-clicked links", test: function (l) { return !l.removed && !l.archived && !l.clicks; } },
+  archived: { label: "Archived",      where: "archived links",      test: function (l) { return !l.removed && !!l.archived; } },
+  missing:  { label: "Missing",       where: "missing links",       test: function (l) { return !l.removed && l.kind === "missing"; } },
+  removed:  { label: "Removed",       where: "removed links",       test: function (l) { return !!l.removed; } }
+};
+var FILTER_ORDER = ["all", "kept", "never", "archived", "missing", "removed"];
+var NOTES = {
+  kept: "Kept links are never archived, and prune skips them. Renaming a link or giving it a new target keeps it too.",
+  never: "Links nobody has clicked yet. A link you haven’t kept is archived 30 days after it was made unless someone clicks it. Linking the file again restarts the clock.",
+  archived: "Archived links are hidden from lists, the menu and ls, but they still work. Clicking one opens the file and brings the link back.",
+  missing: "The files these links point to no longer exist, usually because an agent worktree was removed. Prune turns the ones you haven’t kept into tombstones.",
+  removed: "Tombstones of removed links. A click shows “this file no longer exists” with the old path, and the slug is never given to another file. A renamed link forwards to its new name."
+};
+var EMPTY = {
+  all: ["Nothing in your list", "Every link is archived or removed."],
+  kept: ["No kept links yet", "Use Keep forever on a link, or make one with New link. Kept links are never archived or pruned."],
+  never: ["Every link has been clicked", "Links nobody has opened show up here."],
+  archived: ["Nothing archived", "Links you haven’t kept move here 30 days after they’re made if nobody clicks them, or 180 days after their last click. They keep working."],
+  missing: ["No dead links", "When a linked file is deleted, its link shows up here until you prune it."],
+  removed: ["No removed links", "Pruning, deleting or renaming a link leaves a tombstone here, so its slug is never given to another file."]
+};
+var SORTS = {
+  newest: function (a, b) { return (b.created || 0) - (a.created || 0) || cmpText(a.slug, b.slug); },
+  clicks: function (a, b) { return b.clicks - a.clicks || b.lastClicked - a.lastClicked || cmpText(a.slug, b.slug); },
+  last: function (a, b) { return b.lastClicked - a.lastClicked || (b.created || 0) - (a.created || 0) || cmpText(a.slug, b.slug); }
+};
+
+var session = null, expires = 0, hub = "", links = [], stats = null;
+var view = { filter: "all", project: "", sort: "newest" };
+var openSlug = null, lastFocus = null, editing = null, askFn = null;
+var clickCache = {}, devColor = {}, chipEls = {};
+
+/* ---------- Small helpers ---------- */
+function $(id) { return document.getElementById(id); }
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = text;
+  return e;
+}
+function txt(s) { return document.createTextNode(s); }
+function icon(name, cls) {
+  var s = document.createElementNS(SVGNS, "svg");
+  s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("class", "i" + (cls ? " " + cls : ""));
+  s.setAttribute("aria-hidden", "true");
+  s.setAttribute("focusable", "false");
+  (ICONS[name] || []).forEach(function (d) {
+    var p = document.createElementNS(SVGNS, "path");
+    p.setAttribute("d", d);
+    s.appendChild(p);
+  });
+  return s;
+}
+function btn(label, iconName, fn, cls, title) {
+  var b = el("button", cls);
+  b.type = "button";
+  if (iconName) b.appendChild(icon(iconName));
+  if (label) b.appendChild(el("span", "lbl", label));
+  if (title) b.title = title;
+  b.addEventListener("click", function (e) { e.stopPropagation(); fn(e); });
+  return b;
+}
+function tag(text, cls, title) {
+  var t = el("span", "tag" + (cls ? " " + cls : ""), text);
+  if (title) t.title = title;
+  return t;
+}
+function count(arr, fn) { var n = 0; arr.forEach(function (x) { if (fn(x)) n++; }); return n; }
+function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
+function cmpText(a, b) { return a < b ? -1 : a > b ? 1 : 0; }
+function clamp(x) { return Math.max(0, Math.min(1, x)); }
+function enc(s) { return encodeURIComponent(s); }
+function sortedKeys(o) { o = o || {}; return Object.keys(o).sort(function (a, b) { return o[b] - o[a] || cmpText(a, b); }); }
+function base(t) { var s = t.replace(/\/+$/, ""); return s.slice(s.lastIndexOf("/") + 1); }
+function dirOf(t) { var s = t.replace(/\/+$/, ""); return s.slice(0, s.lastIndexOf("/") + 1); }
+function ext(t) { var b = base(t), i = b.lastIndexOf("."); return i > 0 ? b.slice(i + 1).toLowerCase() : ""; }
+function hostOf(u) { return u.replace(/^[a-z]+:\/\//, ""); }
+function projName(p) { return base(p); }
+function isIP(d) { return /^\d{1,3}(\.\d{1,3}){3}$/.test(d) || d.indexOf(":") >= 0; }
+function deviceLabel(d) { return d === "local" ? "This Mac" : d; }
+function deviceName(d, cls, ip) {
+  var s = el("span", (cls ? cls + " " : "") + (isIP(d) ? "ip" : ""), deviceLabel(d));
+  if (d === "local") s.title = "Clicked on the hub Mac itself";
+  else if (isIP(d)) s.title = "Tailscale has no name for this device";
+  else if (ip) s.title = ip;
+  return s;
+}
+// Only http: and https: URLs ever become an href. "javascript://..." contains "://" too.
+function safeHref(u) {
+  try { var x = new URL(u); return x.protocol === "http:" || x.protocol === "https:" ? x.href : ""; } catch (e) { return ""; }
+}
+function shortHref(l) { return hub ? safeHref(hub + "/" + l.slug) : ""; }
+function linkBtn(label, iconName, href, cls, title) {
+  var a = el("a", "btn" + (cls ? " " + cls : ""));
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  if (iconName) a.appendChild(icon(iconName));
+  if (label) a.appendChild(el("span", "lbl", label));
+  if (title) a.title = title;
+  a.addEventListener("click", function (e) { e.stopPropagation(); });
+  return a;
+}
+// A web link opens directly; any other URL (an app link) opens through the hub's redirect.
+function openUrlBtn(l) {
+  var direct = safeHref(l.target);
+  if (direct) return linkBtn("Open", "open", direct, "", "Open " + hostOf(l.target));
+  var viaHub = shortHref(l);
+  return viaHub ? linkBtn("Open", "open", viaHub, "", "Open it through the short link. This counts as a click") : null;
+}
+function refName(ref) { return ref ? hostOf(ref).replace(/^www\./, "").replace(/\/.*$/, "") : ""; }
+function deviceIcon(name, client) {
+  if (name === "local") return "laptop";
+  if (/ipad/i.test(name)) return "tablet";
+  return client === "mac" ? "laptop" : client === "phone" ? "phone" : "device";
+}
+
+/* Times */
+var MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function ms(s) { var n = s ? Date.parse(s) : 0; return isNaN(n) ? 0 : n; }
+function pad(n) { return (n < 10 ? "0" : "") + n; }
+function startOfDay(t) { var d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); }
+function daysBack(t) { return Math.round((startOfDay(Date.now()) - startOfDay(t)) / DAY); }
+function dateStr(t) { var d = new Date(t); return MON[d.getMonth()] + " " + d.getDate(); }
+function clock(t) { var d = new Date(t); return pad(d.getHours()) + ":" + pad(d.getMinutes()); }
+function dayName(t) { var n = daysBack(t); return n === 0 ? "Today" : n === 1 ? "Yesterday" : dateStr(t); }
+function stamp(t) { return dayName(t) + " " + clock(t); }
+function stampMid(t) { return stamp(t).replace(/^(Today|Yesterday)/, function (m) { return m.toLowerCase(); }); }
+function ago(t) {
+  var s = Date.now() - t;
+  if (s < 60000) return "just now";
+  if (s < HOUR) return Math.floor(s / 60000) + " min ago";
+  var n = daysBack(t);
+  if (n <= 0) return Math.floor(s / HOUR) + " h ago";
+  if (n === 1) return "yesterday";
+  if (n < 45) return n + " days ago";
+  return "on " + dateStr(t);
+}
+function inDays(n) { return n <= 1 ? "tomorrow" : "in " + n + " days"; }
+
+/* ---------- Talking to the hub ---------- */
+function api(method, path, body) {
+  var opts = { method: method, headers: { "Authorization": "Bearer " + session } };
+  if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  return fetch(path, opts).then(function (r) {
+    if (r.status === 401) { locked(); throw new Error("Signed out"); }
+    return r.json().catch(function () { return {}; }).then(function (j) {
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      return j;
+    });
+  });
+}
+
+function signIn() {
+  var code = null;
+  try { code = new URLSearchParams(location.hash.slice(1)).get("code"); } catch (e) {}
+  if (code) { try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {} }
+  try {
+    var saved = JSON.parse(localStorage.getItem(KEY) || "null");
+    if (saved && saved.expires * 1000 > Date.now()) { session = saved.session; expires = saved.expires; }
+  } catch (e) {}
+  if (!code) return Promise.resolve(!!session);
+  gate("signing");
+  return fetch("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: code }) })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (j) {
+      if (j && j.session) {
+        session = j.session; expires = j.expires;
+        try { localStorage.setItem(KEY, JSON.stringify(j)); } catch (e) {}
+      }
+      return !!session;
+    });
+}
+
+function gate(state) { // "signing", "locked", or null when signed in
+  $("gate").hidden = !state;
+  $("gate-signing").hidden = state !== "signing";
+  $("gate-locked").hidden = state !== "locked";
+  $("app").hidden = !!state;
+  $("new").hidden = !!state;
+  $("until").hidden = !!state || !expires;
+  if (state) closeDrawer(true);
+}
+
+function locked() {
+  session = null; expires = 0;
+  try { localStorage.removeItem(KEY); } catch (e) {}
+  gate("locked");
+}
+
+function norm(a) {
+  return {
+    slug: a.slug, target: a.target || "", phone: a.phone || "", kept: !!a.kept, kind: a.kind || "file",
+    created: ms(a.created), origin: a.origin || "", project: a.project || "", session: a.session || "", note: a.note || "",
+    linked: a.linked || 0, lastLinked: ms(a.last_linked) || ms(a.created), clicks: a.clicks || 0,
+    lastClicked: ms(a.last_clicked), lastDevice: a.last_device || "", archived: ms(a.archived), archivesAt: ms(a.archives_at),
+    removed: a.removed ? { at: ms(a.removed.at), why: a.removed.why || "deleted", to: a.removed.to || "" } : null
+  };
+}
+function normClick(c) {
+  return { t: ms(c.t), slug: c.slug || "", device: c.device || c.ip || "", ip: c.ip || "", client: c.client || "other", route: c.route || "unknown", ref: c.ref || "" };
+}
+
+function load() {
+  return Promise.all([
+    // Archived and removed links come too, so every view filters locally.
+    api("GET", "/api/links?details=1&archived=1&removed=1"),
+    api("GET", "/api/stats")
+  ]).then(function (res) {
+    hub = res[0].hub || "";
+    links = (res[0].links || []).map(norm);
+    stats = res[1] || null;
+    gate(null);
+    renderAll();
+  });
+}
+function reload() { return load().catch(function (e) { if (e.message !== "Signed out") toast(e.message); }); }
+function findLink(slug) { for (var i = 0; i < links.length; i++) if (links[i].slug === slug) return links[i]; return null; }
+
+/* ---------- Retention ---------- */
+function retention(l) {
+  if (l.removed) return { state: "removed" };
+  if (l.kind === "missing") return { state: "missing" };
+  if (l.archived) return { state: "archived" };
+  if (l.kept) return { state: "kept" };
+  var now = Date.now(), last = l.lastClicked, r = { state: "active", clicked: l.clicks > 0 };
+  if (l.archivesAt) {
+    // The hub says when; the page only works out which clock is running, for the meter.
+    r.deadline = l.archivesAt;
+    r.win = last && Math.abs(l.archivesAt - (last + LAST_DAYS * DAY)) < DAY ? LAST_DAYS : NEVER_DAYS;
+    r.start = r.deadline - r.win * DAY;
+  } else {
+    var from = Math.max(l.lastLinked, l.created), a = from + NEVER_DAYS * DAY, b = last ? last + LAST_DAYS * DAY : 0;
+    if (b > a) { r.start = last; r.win = LAST_DAYS; } else { r.start = from; r.win = NEVER_DAYS; }
+    r.deadline = r.start + r.win * DAY;
+  }
+  r.left = Math.max(1, Math.ceil((r.deadline - now) / DAY));
+  r.frac = clamp((now - r.start) / (r.win * DAY));
+  r.soon = r.left <= 7;
+  return r;
+}
+function shortRet(l, r) {
+  if (r.state === "active") return "Archives " + inDays(r.left) + (r.clicked ? " without a click" : " unless clicked");
+  if (r.state === "kept") return "Kept: never archived";
+  if (r.state === "archived") return "Archived " + ago(l.archived) + ". Still works";
+  if (r.state === "missing") return l.kept ? "File gone. Kept, so prune skips it" : "File gone. Prune makes it a tombstone";
+  var w = l.removed.why;
+  return w === "pruned" ? "Pruned " + ago(l.removed.at) + ": file no longer exists" : w === "renamed" ? "Renamed to " + l.removed.to : "Deleted " + ago(l.removed.at);
+}
+function longRet(l, r) {
+  if (r.state === "active") {
+    return "Archives " + inDays(r.left) + ", on " + dateStr(r.deadline) + (r.clicked
+      ? ", unless it’s clicked again. Each click restarts the 180-day clock."
+      : ", unless someone clicks it. Linking the file again also restarts the 30-day clock.");
+  }
+  if (r.state === "kept") return "Kept forever: it’s never archived, and prune skips it.";
+  if (r.state === "archived") return "Archived " + ago(l.archived) + ". It still works, and a click brings it back to your list.";
+  if (r.state === "missing") return "The file no longer exists, so a click says so and shows the old path. " + (l.kept
+    ? "Prune skips kept links: edit it to point somewhere else, or delete it."
+    : "Prune turns this link into a tombstone and keeps its slug reserved.");
+  var w = l.removed.why;
+  var s = w === "pruned" ? "Pruned " + ago(l.removed.at) + " because the file no longer exists."
+    : w === "renamed" ? "Renamed to " + l.removed.to + " " + ago(l.removed.at) + ". This address forwards to the new one."
+    : "You deleted it " + ago(l.removed.at) + ".";
+  return s + " The slug stays reserved, so this address never opens a different file.";
+}
+function clickPlan(l) {
+  var b = base(l.target), e = ext(l.target), mac, phone;
+  if (l.removed && l.removed.why === "renamed") { mac = "Goes to the new address, " + hostOf(hub) + "/" + l.removed.to; return { mac: mac, phone: mac }; }
+  if (l.removed && l.removed.why === "deleted" && l.kind !== "missing") { mac = "Shows “this link was removed” with the old path"; return { mac: mac, phone: mac }; }
+  if (l.removed || l.kind === "missing") { mac = "Shows “this file no longer exists” with the old path"; return { mac: mac, phone: mac }; }
+  if (l.kind === "url") return { mac: "Goes straight to " + l.target, phone: /^https?:/.test(l.target) ? "Goes straight to the page" : "Opens the app, if it’s installed" };
+  if (l.kind === "folder") mac = "Opens the folder in Finder";
+  else if (RUN_EXT.indexOf(e) >= 0) mac = "Shows " + b + " in Finder. Scripts and apps are never opened";
+  else mac = "Opens " + b + " in its default app";
+  if (l.phone) phone = "Opens the phone page at " + hostOf(l.phone);
+  else if (l.kind === "folder") phone = "Lists the folder’s files, or shows its index.html";
+  else if (e === "html") phone = l.kept ? "Shows the page" : "Shows the page, sandboxed: scripts run, with no storage";
+  else if (TEXT_EXT.indexOf(e) >= 0) phone = "Shows the file as plain text";
+  else phone = "Shows the file";
+  return { mac: mac, phone: phone };
+}
+
+/* ---------- View state ---------- */
+function loadView() {
+  try {
+    var v = JSON.parse(localStorage.getItem(VIEW_KEY) || "null");
+    if (v && FILTERS[v.filter]) view.filter = v.filter;
+    if (v && SORTS[v.sort]) view.sort = v.sort;
+  } catch (e) {}
+}
+function saveView() { try { localStorage.setItem(VIEW_KEY, JSON.stringify({ filter: view.filter, sort: view.sort })); } catch (e) {} }
+function words() { return $("q").value.toLowerCase().split(/\s+/).filter(Boolean); }
+function matches(l, w) {
+  if (!w.length) return true;
+  var hay = (l.slug + " " + l.target + " " + l.note + " " + l.project + " " + l.session).toLowerCase();
+  return w.every(function (x) { return hay.indexOf(x) >= 0; });
+}
+function inProject(l) { return !view.project || (view.project === "-" ? !l.project : l.project === view.project); }
+function visible(w) {
+  return links.filter(function (l) { return FILTERS[view.filter].test(l) && inProject(l) && matches(l, w); }).sort(SORTS[view.sort]);
+}
+function setFilter(k, fromOverview) {
+  view.filter = k; saveView(); renderList();
+  if (fromOverview) $("controls").scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+/* ---------- Rendering ---------- */
+function renderAll() {
+  var has = links.length > 0;
+  $("controls").hidden = !has;
+  $("hint").hidden = !has;
+  $("hub-host").textContent = hub ? hostOf(hub) : "";
+  $("until").textContent = expires ? "Signed in until " + clock(expires * 1000) : "";
+  $("until").hidden = !expires;
+  buildDevColors();
+  buildProjects();
+  renderOverview();
+  renderList();
+  if (openSlug) renderDrawer();
+}
+
+function buildDevColors() {
+  devColor = {};
+  sortedKeys(stats && stats.by_device).forEach(function (d, i) { if (i < 4) devColor[d] = String(i); });
+}
+function devCls(d, prefix) { return prefix + (devColor[d] !== undefined ? devColor[d] : "x"); }
+
+function buildProjects() {
+  var s = $("project"), cur = view.project, live = links.filter(function (l) { return !l.removed; }), seen = {};
+  s.textContent = "";
+  function opt(v, t) { var o = el("option", null, t); o.value = v; s.appendChild(o); }
+  opt("", "All projects");
+  live.forEach(function (l) { if (l.project) seen[l.project] = (seen[l.project] || 0) + 1; });
+  Object.keys(seen).sort().forEach(function (p) { opt(p, projName(p) + " (" + seen[p] + ")"); });
+  var none = count(live, function (l) { return !l.project; });
+  if (none) opt("-", "No project (" + none + ")");
+  s.value = cur;
+  if (s.value !== cur) { view.project = ""; s.value = ""; }
+}
+
+function cell(parent, num, label, onClick) {
+  var c = el(onClick ? "button" : "div", "ov");
+  if (onClick) { c.type = "button"; c.addEventListener("click", onClick); }
+  c.appendChild(el("span", "ov-num", String(num)));
+  c.appendChild(el("span", "ov-label", label));
+  parent.appendChild(c);
+  return c;
+}
+
+function renderOverview() {
+  var ov = $("overview");
+  ov.textContent = "";
+  if (!links.length || !stats) { ov.hidden = true; return; }
+  ov.hidden = false;
+  var s = stats, week0 = startOfDay(Date.now()) - 6 * DAY;
+
+  var c1 = cell(ov, s.links, s.links === 1 ? "link" : "links");
+  c1.appendChild(el("span", "ov-sub", (s.kept || 0) + " kept forever"));
+  if (s.archived) c1.appendChild(el("span", "ov-sub", s.archived + " archived, still working"));
+
+  // Imported links (from links.txt or `shortlinker import`) weren't made this week.
+  var made = links.filter(function (l) { return l.created >= week0 && l.origin !== "import"; });
+  var c2 = cell(ov, s.made_week, "made this week");
+  c2.appendChild(weekChart(made, week0));
+  c2.appendChild(el("span", "ov-sub", made.length ? count(made, function (l) { return l.clicks > 0; }) + " of them clicked so far" : "Nothing new this week"));
+
+  // Worked out from the list itself, so it matches the Never clicked filter.
+  var listed = count(links, FILTERS.all.test), never = count(links, FILTERS.never.test);
+  var pct = listed ? Math.round(never / listed * 100) : 0;
+  var c3 = cell(ov, pct + "%", "never clicked", function () { setFilter("never", true); });
+  c3.title = "Show the links nobody has clicked";
+  var sp = el("span", "split"), spa = el("span");
+  sp.setAttribute("aria-hidden", "true");
+  spa.style.width = pct + "%";
+  sp.appendChild(spa);
+  c3.appendChild(sp);
+  c3.appendChild(el("span", "ov-sub", never + " of " + listed + " links in your list"));
+
+  var c4 = cell(ov, s.clicks_week, s.clicks_week === 1 ? "click this week" : "clicks this week");
+  var devs = sortedKeys(s.by_device);
+  c4.appendChild(el("span", "ov-sub", (s.clicks_month || 0) + " in 30 days" + (devs.length ? ", by device:" : "")));
+  if (devs.length) {
+    var st = el("span", "stack"), lg = el("ul", "legend");
+    st.setAttribute("aria-hidden", "true");
+    devs.forEach(function (d) {
+      var seg = el("span", devCls(d, "dv"));
+      seg.style.flex = s.by_device[d] + " 0 0%";
+      st.appendChild(seg);
+      var li = el("li");
+      li.appendChild(el("span", "sw " + devCls(d, "dv")));
+      li.appendChild(deviceName(d, "nm"));
+      li.appendChild(el("span", "n", String(s.by_device[d])));
+      lg.appendChild(li);
+    });
+    c4.appendChild(st);
+    c4.appendChild(lg);
+  }
+
+  var refs = sortedKeys(s.by_ref), refTotal = 0;
+  refs.forEach(function (r) { refTotal += s.by_ref[r]; });
+  var none = Math.max(0, (s.clicks_month || 0) - refTotal);
+  var c5 = cell(ov, refs.length ? refs[0] : "None", "top referrer, 30 days");
+  var rl = el("ul", "refs"), rmax = Math.max(1, none, refs.length ? s.by_ref[refs[0]] : 0);
+  refs.slice(0, 3).forEach(function (r) { rl.appendChild(refRow(r, s.by_ref[r], rmax, "")); });
+  if (none) rl.appendChild(refRow("none (apps, typed links)", none, rmax, "none"));
+  c5.appendChild(rl);
+
+  var c6 = cell(ov, s.missing, s.missing === 1 ? "dead link" : "dead links");
+  var prunable = count(links, function (l) { return !l.removed && !l.kept && l.kind === "missing"; });
+  if (s.missing) {
+    c6.classList.add("warn");
+    var acts = el("span", "ov-acts");
+    if (prunable) acts.appendChild(btn("Prune", "prune", prune, "danger", "Turn dead links you haven’t kept into tombstones"));
+    acts.appendChild(btn("Show", null, function () { setFilter("missing", true); }, "quiet"));
+    c6.appendChild(acts);
+    c6.appendChild(el("span", "ov-safe", prunable
+      ? "Safe to prune: old links show “file no longer exists”, never another file."
+      : s.missing === 1 ? "It’s kept, so prune skips it." : "They’re all kept, so prune skips them."));
+  } else {
+    c6.appendChild(el("span", "ov-sub", "Nothing to prune."));
+  }
+}
+
+function weekChart(made, week0) {
+  var wk = el("span", "week"), days = [], max = 1;
+  wk.setAttribute("aria-hidden", "true");
+  for (var i = 0; i < 7; i++) {
+    var d0 = week0 + i * DAY, d1 = d0 + DAY;
+    var n = 0, c = 0;
+    made.forEach(function (l) { if (l.created >= d0 && l.created < d1) { n++; if (l.clicks) c++; } });
+    days.push({ t: d0, n: n, c: c });
+    max = Math.max(max, n);
+  }
+  days.forEach(function (p) {
+    var col = el("span", "day");
+    col.title = dayName(p.t) + ": " + p.n + " made, " + p.c + " clicked";
+    if (!p.n) col.appendChild(el("span", "z"));
+    if (p.n - p.c) { var u = el("span", "u"); u.style.height = ((p.n - p.c) / max * 100) + "%"; col.appendChild(u); }
+    if (p.c) { var cl = el("span", "c"); cl.style.height = (p.c / max * 100) + "%"; col.appendChild(cl); }
+    wk.appendChild(col);
+  });
+  return wk;
+}
+
+function refRow(name, n, max, cls) {
+  var li = el("li", cls), bar = el("span", "bar");
+  li.appendChild(el("span", "nm", name));
+  li.appendChild(el("span", "n", String(n)));
+  bar.style.width = Math.round(n / max * 100) + "%";
+  li.appendChild(bar);
+  return li;
+}
+
+function buildChips() {
+  var box = $("chips");
+  FILTER_ORDER.forEach(function (k) {
+    var b = el("button", "chip"), ct = el("span", "ct");
+    b.type = "button";
+    b.appendChild(el("span", null, FILTERS[k].label));
+    b.appendChild(ct);
+    b.addEventListener("click", function () { setFilter(k); });
+    chipEls[k] = { b: b, ct: ct };
+    box.appendChild(b);
+  });
+}
+function updateChips(w) {
+  FILTER_ORDER.forEach(function (k) {
+    chipEls[k].b.setAttribute("aria-pressed", String(view.filter === k));
+    chipEls[k].ct.textContent = String(count(links, function (l) { return FILTERS[k].test(l) && inProject(l) && matches(l, w); }));
+  });
+}
+
+function hiddenMatches(w) {
+  var out = [];
+  ["archived", "removed"].forEach(function (k) {
+    if (k === view.filter) return;
+    var n = count(links, function (l) { return FILTERS[k].test(l) && !FILTERS[view.filter].test(l) && inProject(l) && matches(l, w); });
+    if (n) out.push([k, n]);
+  });
+  return out;
+}
+
+function renderList() {
+  var w = words(), shown = visible(w);
+  var list = $("list"), st = $("state"), note = $("viewnote"), extra = $("extra");
+  updateChips(w);
+  list.textContent = ""; st.textContent = ""; extra.textContent = "";
+  extra.hidden = true;
+  note.textContent = NOTES[view.filter] || "";
+  note.hidden = !NOTES[view.filter] || !links.length;
+  if (!links.length) { list.hidden = true; st.hidden = false; emptyHub(st); return; }
+  if (!shown.length) {
+    list.hidden = true; st.hidden = false;
+    if (w.length || view.project) noMatch(st, w); else emptyView(st);
+    return;
+  }
+  st.hidden = true; list.hidden = false;
+  var frag = document.createDocumentFragment();
+  shown.forEach(function (l) { frag.appendChild(row(l)); });
+  list.appendChild(frag);
+  if (w.length) {
+    var hm = hiddenMatches(w);
+    if (hm.length) {
+      extra.hidden = false;
+      extra.appendChild(el("span", null, "Also matching:"));
+      hm.forEach(function (h) { extra.appendChild(btn(h[1] + " " + FILTERS[h[0]].label.toLowerCase(), null, function () { setFilter(h[0]); })); });
+    }
+  }
+}
+
+function emptyHub(st) {
+  st.appendChild(icon("url", "big"));
+  st.appendChild(el("h2", null, "No links yet"));
+  st.appendChild(el("p", null, "sl-link makes a link for every file an agent shows you. Run it on any file to make one, or add a link here."));
+  st.appendChild(el("code", null, "sl-link ~/Code/my-app/docs/plan.md"));
+  var acts = el("div", "acts");
+  acts.appendChild(btn("New link", "plus", function () { edit(null); }, "primary"));
+  st.appendChild(acts);
+}
+function emptyView(st) {
+  var e = EMPTY[view.filter];
+  st.appendChild(icon(view.filter === "removed" || view.filter === "missing" ? "gone" : view.filter === "archived" ? "archive" : "url", "big"));
+  st.appendChild(el("h2", null, e[0]));
+  st.appendChild(el("p", null, e[1]));
+  if (view.filter !== "all") {
+    var acts = el("div", "acts");
+    acts.appendChild(btn("Show all links", null, function () { setFilter("all"); }));
+    st.appendChild(acts);
+  }
+}
+function noMatch(st, w) {
+  var q = $("q").value.trim(), where = FILTERS[view.filter].where;
+  if (view.project) where += view.project === "-" ? " without a project" : " in " + projName(view.project);
+  st.appendChild(icon("search", "big"));
+  st.appendChild(el("h2", null, q ? "Nothing matches “" + q + "”" : "Nothing in this project"));
+  st.appendChild(el("p", null, q ? "None of " + where + " has that in its slug, path, note, project or session." : "There are no " + where + "."));
+  var acts = el("div", "acts");
+  hiddenMatches(w).forEach(function (h) {
+    acts.appendChild(btn("Show " + h[1] + " " + FILTERS[h[0]].label.toLowerCase(), null, function () { setFilter(h[0]); }, "primary"));
+  });
+  if (q) acts.appendChild(btn("Clear search", null, function () { $("q").value = ""; renderList(); $("q").focus(); }));
+  if (view.filter !== "all") acts.appendChild(btn("Search all links", null, function () { setFilter("all"); }));
+  if (view.project) acts.appendChild(btn("All projects", null, function () { view.project = ""; $("project").value = ""; renderList(); }));
+  st.appendChild(acts);
+}
+
+function kindIcon(l) { return l.removed || l.kind === "missing" ? "gone" : l.kind === "url" ? "url" : l.kind === "folder" ? "folder" : "file"; }
+function kindLabel(l) {
+  if (l.kind === "missing") return "Missing file or folder";
+  if (l.kind === "url") return /^https?:/.test(l.target) ? "Web link" : "App link";
+  return l.kind === "folder" ? "Folder" : "File";
+}
+function badges(l) {
+  var out = [];
+  if (l.kept) out.push(tag("Kept", "kept", "Kept forever: never archived, and prune skips it"));
+  if (l.phone) out.push(tag("phone page", "", "Phones open " + hostOf(l.phone)));
+  if (l.target.indexOf("/.worktrees/") >= 0) out.push(tag("worktree", "", "Inside an agent worktree, which is usually deleted once the work is merged"));
+  if (l.removed) out.push(tag(l.removed.why === "renamed" ? "renamed" : "removed", l.removed.why === "renamed" ? "" : "warn"));
+  else if (l.kind === "missing") out.push(tag("file gone", "warn", "The file no longer exists"));
+  if (l.archived && !l.removed) out.push(tag("archived"));
+  return out;
+}
+function targetLine(l) {
+  var t = el("span", "r-target");
+  t.title = l.target;
+  if (l.kind === "url") { t.appendChild(el("span", "base", l.target)); return t; }
+  var d = dirOf(l.target);
+  if (d) t.appendChild(el("span", "dir", d));
+  t.appendChild(el("span", "base", base(l.target) + (l.kind === "folder" ? "/" : "")));
+  return t;
+}
+function madeText(l) {
+  if (l.origin === "import") return l.created ? "imported " + ago(l.created) : "imported";
+  var how = ORIGIN_SHORT[l.origin] ? " " + ORIGIN_SHORT[l.origin] : "";
+  return l.created ? "made " + ago(l.created) + how : "made" + how;
+}
+
+function row(l) {
+  var r = retention(l);
+  var li = el("li", "row" + (l.removed ? " tomb" : l.archived ? " arch" : "") + (l.slug === openSlug ? " is-open" : ""));
+  var main = el("button", "r-main");
+  li._slug = l.slug;
+  main.type = "button";
+  main.addEventListener("click", function (e) { e.stopPropagation(); openDrawer(l.slug, main); });
+  li.addEventListener("click", function () { openDrawer(l.slug, main); });
+
+  var top = el("span", "r-top");
+  top.appendChild(icon(kindIcon(l), "r-kind"));
+  top.appendChild(el("span", "sr", kindLabel(l) + ": "));
+  top.appendChild(el("span", "slug", l.slug));
+  badges(l).forEach(function (b) { top.appendChild(b); });
+  main.appendChild(top);
+  main.appendChild(targetLine(l));
+  var meta = el("span", "r-meta");
+  if (l.project) { var p = el("span", "proj", projName(l.project)); p.title = l.project; meta.appendChild(p); }
+  if (l.note) meta.appendChild(el("span", "note", l.note));
+  meta.appendChild(el("span", "made", madeText(l)));
+  main.appendChild(meta);
+  li.appendChild(main);
+
+  var act = el("div", "r-act"), c = el("div", "r-clicks");
+  if (l.clicks) {
+    c.appendChild(el("b", null, plural(l.clicks, "click")));
+    if (l.lastDevice) {
+      c.appendChild(txt(", last opened from "));
+      c.appendChild(deviceName(l.lastDevice));
+      c.appendChild(txt(l.lastClicked ? ", " + ago(l.lastClicked) : ""));
+    } else if (l.lastClicked) {
+      c.appendChild(txt(", last opened " + ago(l.lastClicked)));
+    }
+  } else {
+    c.textContent = "Never clicked";
+  }
+  act.appendChild(c);
+  if (r.state === "active") {
+    var m = el("div", "meter" + (r.soon ? " soon" : "")), f = el("span");
+    m.setAttribute("aria-hidden", "true");
+    f.style.width = Math.round(r.frac * 100) + "%";
+    m.appendChild(f);
+    act.appendChild(m);
+  }
+  var warn = r.soon || r.state === "missing";
+  act.appendChild(el("div", "r-ret" + (warn ? " warn" : ""), shortRet(l, r)));
+  li.appendChild(act);
+  li.appendChild(rowActions(l));
+  return li;
+}
+
+function rowActions(l) {
+  var a = el("div", "r-acts");
+  a.appendChild(btn("Copy", "copy", function () { copyLink(l); }, "copy", "Copy the link"));
+  if (l.removed) {
+    a.appendChild(btn("Details", "details", function () { openDrawer(l.slug); }, "", "Show the record"));
+    return a;
+  }
+  if (l.kind === "url") { var o = openUrlBtn(l); if (o) a.appendChild(o); }
+  else if (l.kind !== "missing") {
+    a.appendChild(btn("Open", "open", function () { openIt(l, false); }, "", "Open it on this Mac"));
+    a.appendChild(btn("Finder", "finder", function () { openIt(l, true); }, "", "Show it in Finder on this Mac"));
+  }
+  a.appendChild(btn("Edit", "edit", function () { edit(l); }, "", "Rename it, change what it points to, or add a note"));
+  if (l.archived) a.appendChild(btn("Restore", "restore", function () { setArchived(l, false); }, "", "Bring it back to your list"));
+  else if (!l.kept) a.appendChild(btn("Archive", "archive", function () { setArchived(l, true); }, "", "Hide it from lists. It keeps working"));
+  a.appendChild(btn("Delete", "trash", function () { remove(l); }, "danger", "Delete it. The slug stays reserved"));
+  return a;
+}
+
+/* ---------- Detail drawer ---------- */
+function openDrawer(slug, from) {
+  var wasOpen = !!openSlug;
+  if (!wasOpen) lastFocus = from || document.activeElement;
+  openSlug = slug;
+  renderDrawer();
+  markOpenRow();
+  $("d-body").scrollTop = 0;
+  if (wasOpen) { focusQuiet($("d-title")); return; }
+  var d = $("drawer"), s = $("scrim");
+  d.hidden = false; s.hidden = false;
+  document.documentElement.classList.add("locked");
+  void d.offsetWidth; // start the slide-in from the closed position
+  d.classList.add("open"); s.classList.add("open");
+  focusQuiet($("d-close"));
+}
+function closeDrawer(quiet) {
+  if (!openSlug) return;
+  var closed = openSlug, d = $("drawer"), s = $("scrim");
+  openSlug = null;
+  markOpenRow();
+  d.classList.remove("open"); s.classList.remove("open");
+  document.documentElement.classList.remove("locked");
+  setTimeout(function () { if (!openSlug) { d.hidden = true; s.hidden = true; } }, 260);
+  if (quiet) return;
+  var back = lastFocus;
+  if (!back || !document.body.contains(back)) {
+    back = $("q");
+    Array.prototype.forEach.call($("list").children, function (li) { if (li._slug === closed) back = li.querySelector(".r-main"); });
+  }
+  if (back) focusQuiet(back);
+}
+function focusQuiet(n) { try { n.focus({ preventScroll: true }); } catch (e) { n.focus(); } }
+function markOpenRow() {
+  Array.prototype.forEach.call($("list").children, function (li) { li.classList.toggle("is-open", !!openSlug && li._slug === openSlug); });
+}
+function step(dir) {
+  var vis = visible(words()), i = -1;
+  vis.forEach(function (l, j) { if (l.slug === openSlug) i = j; });
+  if (i >= 0 && vis[i + dir]) openDrawer(vis[i + dir].slug);
+}
+
+function section(parent, title, ct) {
+  var s = el("section", "d-sec");
+  if (title) {
+    var h = el("h3", null, title);
+    if (ct) h.appendChild(el("span", "ct", ct));
+    s.appendChild(h);
+  }
+  parent.appendChild(s);
+  return s;
+}
+function defs(parent, rows) {
+  var dl = el("dl", "rec");
+  rows.forEach(function (r) {
+    if (!r) return;
+    var dd = el("dd", r[2] || null);
+    if (typeof r[1] === "string") dd.textContent = r[1]; else dd.appendChild(r[1]);
+    dl.appendChild(el("dt", null, r[0]));
+    dl.appendChild(dd);
+  });
+  parent.appendChild(dl);
+  return dl;
+}
+
+function clicksFor(l) {
+  // A tombstone counts no clicks, but its history can still hold "removed" or "renamed" ones.
+  if (!l.clicks && !l.removed) return [];
+  var c = clickCache[l.slug];
+  if (c === undefined) {
+    clickCache[l.slug] = null; // loading
+    api("GET", "/api/links/" + enc(l.slug) + "/clicks?limit=" + CLICK_LIMIT).then(function (list) {
+      clickCache[l.slug] = Array.isArray(list) ? list.map(normClick).sort(function (a, b) { return b.t - a.t; }) : [];
+      if (openSlug === l.slug) renderDrawer();
+    }, function (e) {
+      clickCache[l.slug] = { error: e.message };
+      if (openSlug === l.slug) renderDrawer();
+    });
+    return null;
+  }
+  return c;
+}
+
+function renderDrawer() {
+  var l = findLink(openSlug);
+  if (!l) { closeDrawer(); return; }
+  var r = retention(l), body = $("d-body"), y = body.scrollTop, hist = clicksFor(l);
+  var ok = Array.isArray(hist), du = $("d-url"), sh = shortHref(l);
+  // Keep a half-typed note across re-renders (clicks arriving, other actions).
+  var old = $("d-note"), draft = old && old._slug === l.slug ? { v: old.value, f: document.activeElement === old, s: old.selectionStart } : null;
+  $("d-title").textContent = l.slug;
+  du.textContent = (hub ? hostOf(hub) : "") + "/" + l.slug;
+  if (sh) { du.href = sh; du.title = "Open the short link. This counts as a click from this Mac"; }
+  else { du.removeAttribute("href"); du.removeAttribute("title"); }
+  var vis = visible(words()), i = -1;
+  vis.forEach(function (x, j) { if (x.slug === l.slug) i = j; });
+  $("d-prev").disabled = i <= 0;
+  $("d-next").disabled = i < 0 || i >= vis.length - 1;
+  body.textContent = "";
+
+  // Status: badges, retention, lifeline, actions
+  var s1 = section(body), bd = el("div", "d-badges");
+  badges(l).forEach(function (b) { bd.appendChild(b); });
+  s1.appendChild(bd);
+  if (!l.removed) {
+    var ne = noteEditor(l);
+    s1.appendChild(ne.wrap);
+    if (draft) {
+      ne.inp.value = draft.v;
+      ne.sync();
+      if (draft.f) { focusQuiet(ne.inp); try { ne.inp.setSelectionRange(draft.s, draft.s); } catch (e) {} }
+    }
+  }
+  s1.appendChild(el("p", "d-ret" + (r.soon || r.state === "missing" ? " warn" : ""), longRet(l, r)));
+  s1.appendChild(lifeline(l, r, ok ? hist : []));
+  if (!l.kept && !l.removed && l.kind !== "missing") {
+    var keep = el("div", "keep");
+    keep.appendChild(el("p", null, "Keep forever and it’s never archived, and prune skips it."));
+    keep.appendChild(btn("Keep forever", "keep", function () { setKept(l, true); }, "primary"));
+    s1.appendChild(keep);
+  }
+  var acts = el("div", "d-acts");
+  if (!l.removed) {
+    if (l.kind === "url") { var o = openUrlBtn(l); if (o) acts.appendChild(o); }
+    else if (l.kind !== "missing") {
+      acts.appendChild(btn("Open", "open", function () { openIt(l, false); }, "", "Open it on this Mac"));
+      acts.appendChild(btn("Show in Finder", "finder", function () { openIt(l, true); }, "", "Show it in Finder on this Mac"));
+    }
+    acts.appendChild(btn("Edit", "edit", function () { edit(l); }));
+    if (l.archived) acts.appendChild(btn("Restore", "restore", function () { setArchived(l, false); }));
+    else if (!l.kept) acts.appendChild(btn("Archive", "archive", function () { setArchived(l, true); }));
+    if (l.kept) acts.appendChild(btn("Stop keeping", "keep", function () { setKept(l, false); }, "", "Let it be archived and pruned again"));
+    acts.appendChild(btn("Delete", "trash", function () { remove(l); }, "danger"));
+  } else if (l.removed.why === "renamed" && findLink(l.removed.to)) {
+    acts.appendChild(btn("Show " + l.removed.to, "details", function () { openDrawer(l.removed.to); }));
+  }
+  if (acts.childNodes.length) s1.appendChild(acts);
+
+  // What a click does
+  var p = clickPlan(l), s2 = section(body, "What a click does");
+  defs(s2, [["On a Mac", p.mac], ["On a phone", p.phone]]);
+  if (l.archived && !l.removed) s2.appendChild(el("p", "d-note", "A click also brings it back to your list."));
+
+  // The record
+  var s3 = section(body, "Record");
+  var phoneHref = safeHref(l.phone), phoneVal;
+  if (phoneHref) {
+    phoneVal = el("a", null, l.phone);
+    phoneVal.href = phoneHref; phoneVal.target = "_blank"; phoneVal.rel = "noopener noreferrer";
+  } else {
+    phoneVal = l.phone || (l.kind === "url" ? "Not needed for URLs" : "None. Phones get the file itself");
+  }
+  var rows = [
+    ["Target", l.target, "mono"],
+    ["Kind", kindLabel(l)],
+    ["Kept", l.kept ? "Yes: never archived, and prune skips it" : "No", l.kept ? "" : "none"],
+    ["Made by", ORIGIN_TEXT[l.origin] || l.origin || "Not recorded", l.origin ? "" : "none"],
+    ["Project", l.project || "None", l.project ? "mono" : "none"],
+    l.removed ? ["Note", l.note || "None", l.note ? "" : "none"] : null,
+    ["Created", l.created ? stamp(l.created) : "Not recorded", l.created ? "" : "none"],
+    ["Linked", l.linked ? plural(l.linked, "time") + (l.linked > 1 ? ", last " + stampMid(l.lastLinked) : "") : "Never printed by sl-link", l.linked ? "" : "none"],
+    ["Clicks", l.clicks ? l.clicks + ", last " + stampMid(l.lastClicked) + (l.lastDevice ? " on " + deviceLabel(l.lastDevice) : "") : l.removed ? "None counted" : "None yet", l.clicks ? "" : "none"],
+    ["Archived", l.archived ? stamp(l.archived) : "No", l.archived ? "" : "none"],
+    ["Phone page", phoneVal, l.phone ? "mono" : "none"]
+  ];
+  if (l.removed) rows.push(["Removed", stamp(l.removed.at) + ", " + (l.removed.why === "renamed" ? "renamed to " + l.removed.to : WHY[l.removed.why] || l.removed.why)]);
+  defs(s3, rows);
+
+  // Session
+  var s4 = section(body, "Session");
+  if (l.session) {
+    var cmd = "claude --resume " + l.session, box = el("div", "cmd");
+    box.appendChild(icon("terminal"));
+    box.appendChild(el("code", null, cmd));
+    box.appendChild(btn("Copy", "copy", function () { copyText(cmd, "Copied claude --resume " + l.session.slice(0, 8) + "…"); }, "", "Copy the command"));
+    s4.appendChild(box);
+    s4.appendChild(el("p", "d-note", "Run it in " + (l.project || "the folder the session ran in") + " to reopen the conversation that made this link."));
+    var sibs = links.filter(function (o) { return o !== l && o.session === l.session; });
+    if (sibs.length) {
+      s4.appendChild(el("p", "d-sub", "Also linked in this session"));
+      var wrap = el("div", "sibs");
+      sibs.forEach(function (o) { wrap.appendChild(btn(o.slug, null, function () { openDrawer(o.slug); }, "sib" + (o.removed ? " gone" : ""))); });
+      s4.appendChild(wrap);
+    }
+  } else {
+    s4.appendChild(el("p", "d-note", NO_SESSION[l.origin] || "None recorded."));
+  }
+
+  // Click history
+  var s5 = section(body, "Clicks", l.clicks ? String(l.clicks) : "");
+  if (hist === null) s5.appendChild(el("p", "d-note", "Loading clicks…"));
+  else if (!ok) s5.appendChild(el("p", "d-note", "Couldn’t load the clicks: " + hist.error));
+  else if (!hist.length) s5.appendChild(el("p", "d-note", l.removed ? "Nobody has clicked it since it was removed." : "No clicks yet. Each click from a device on your tailnet shows up here: when, which device, what it did and where it came from."));
+  else {
+    var ul = el("ul", "hist");
+    hist.forEach(function (c) {
+      var li = el("li"), what = el("span", "h-what"), dv = el("span", "h-dev");
+      li.appendChild(el("span", "h-when", stamp(c.t)));
+      dv.appendChild(icon(deviceIcon(c.device, c.client), devCls(c.device, "tx")));
+      dv.appendChild(deviceName(c.device, "", c.ip));
+      var cl = el("span", "h-client", c.client);
+      cl.title = "How the hub treated the click";
+      dv.appendChild(cl);
+      if (UNCOUNTED[c.route]) { var nc = el("span", "h-client", "not counted"); nc.title = "Clicks on an old or removed slug don’t count as clicks"; dv.appendChild(nc); }
+      what.appendChild(dv);
+      what.appendChild(el("span", "h-sub", (ROUTE_TEXT[c.route] || c.route) + (c.ref ? ", from " + refName(c.ref) : ", no referrer")));
+      li.appendChild(what);
+      ul.appendChild(li);
+    });
+    s5.appendChild(ul);
+    if (hist.length >= CLICK_LIMIT) s5.appendChild(el("p", "d-note", "Showing the latest " + CLICK_LIMIT + "."));
+  }
+  body.scrollTop = y;
+}
+
+function noteEditor(l) {
+  var wrap = el("div", "noteed"), inp = el("input");
+  inp.type = "text";
+  inp.id = "d-note";
+  inp.maxLength = NOTE_MAX;
+  inp.value = l.note;
+  inp.placeholder = "Add a note: why this link exists";
+  inp.setAttribute("aria-label", "Note");
+  inp.setAttribute("autocomplete", "off");
+  inp._slug = l.slug;
+  var save = btn("Save note", null, function () { saveNote(l.slug, inp.value.trim()); }, "", "Save the note");
+  function sync() { save.hidden = inp.value.trim() === l.note; }
+  inp.addEventListener("input", sync);
+  inp.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); if (!save.hidden) saveNote(l.slug, inp.value.trim()); }
+  });
+  sync();
+  wrap.appendChild(inp);
+  wrap.appendChild(save);
+  return { wrap: wrap, inp: inp, sync: sync };
+}
+
+function lifeline(l, r, hist) {
+  var wrap = el("div", "life"), track = el("div", "lt"), now = Date.now();
+  wrap.setAttribute("aria-hidden", "true");
+  var first = hist.length ? hist[hist.length - 1].t : 0;
+  var start = l.created || (first ? Math.min(first, now - DAY) : now - 30 * DAY);
+  var end = r.state === "active" ? r.deadline : now;
+  if (end - start < DAY) end = start + DAY;
+  function pos(t) { return Math.max(0, Math.min(100, (t - start) / (end - start) * 100)); }
+  function mark(cls, t) { var m = el("span", "mk " + cls); m.style.left = pos(t) + "%"; track.appendChild(m); }
+  track.appendChild(el("span", "lt-line"));
+  var past = el("span", "lt-past");
+  past.style.width = pos(now) + "%";
+  track.appendChild(past);
+  if (r.state === "active") {
+    var tick = el("span", "mk-now");
+    tick.style.left = pos(now) + "%";
+    track.appendChild(tick);
+  }
+  if (l.created) mark("mk-made", l.created);
+  var relinked = l.created && l.lastLinked - l.created > HOUR;
+  if (relinked) mark("mk-relink", l.lastLinked);
+  hist.forEach(function (c) { mark("mk-click " + devCls(c.device, "dv"), c.t); });
+  if (l.archived) mark("mk-arch", l.archived);
+  if (l.removed) mark("mk-rm", l.removed.at);
+  if (r.state === "active") {
+    mark("mk-end" + (r.soon ? " soon" : ""), r.deadline);
+    var np = pos(now), lab = el("span", "mk-now-l" + (np < 12 ? " l" : np > 88 ? " r" : ""), "today");
+    lab.style.left = np + "%";
+    track.appendChild(lab);
+  }
+  wrap.appendChild(track);
+  var labels = el("div", "life-labels");
+  labels.appendChild(el("span", null, l.created ? "Made " + dateStr(l.created) : first ? "First click " + dateStr(first) : ""));
+  labels.appendChild(el("span", null, r.state === "active" ? "Archives " + dateStr(r.deadline) : "Today"));
+  wrap.appendChild(labels);
+
+  var key = el("div", "life-key");
+  function k(cls, text) { var s = el("span"); s.appendChild(el("i", "k " + cls)); s.appendChild(txt(text)); key.appendChild(s); }
+  if (l.created) k("k-made", "made");
+  var devs = {};
+  hist.forEach(function (c) { devs[c.device] = 1; });
+  Object.keys(devs).sort().forEach(function (d) { k("k-click " + devCls(d, "dv"), deviceLabel(d)); });
+  if (relinked) k("k-relink", "linked again");
+  if (l.archived) k("k-arch", "archived");
+  if (l.removed) k("k-rm", "removed");
+  if (r.state === "active") k("k-end" + (r.soon ? " soon" : ""), "archive date");
+  wrap.appendChild(key);
+  return wrap;
+}
+
+/* ---------- Actions ---------- */
+function toast(msg, action, fn) {
+  var t = $("toast");
+  t.textContent = "";
+  t.appendChild(el("span", null, msg));
+  if (action) {
+    var b = el("button", "t-act", action);
+    b.type = "button";
+    b.addEventListener("click", function () { hideToast(); fn(); });
+    t.appendChild(b);
+  }
+  t.classList.add("show");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(hideToast, action ? 5000 : 2200);
+}
+function hideToast() { $("toast").classList.remove("show"); }
+
+function copyText(text, msg) {
+  var done = function () { toast(msg); }, fail = function () { toast("Couldn’t copy. The text is: " + text); };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fail);
+    else fail();
+  } catch (e) { fail(); }
+}
+function copyLink(l) {
+  if (!hub) { toast("The hub’s address isn’t known yet: run sl-link once"); return; }
+  copyText(hub + "/" + l.slug, "Copied " + hostOf(hub) + "/" + l.slug);
+}
+// Files and folders: Open and Finder run on this Mac, the hub. (URLs open through links; see openUrlBtn.)
+function openIt(l, reveal) {
+  fetch("/o/" + enc(l.slug) + (reveal ? "?reveal=1" : "")).then(function (r) {
+    var b = base(l.target);
+    if (!r.ok) { r.text().then(function (t) { toast(t.trim() || r.statusText); }); return; }
+    if (reveal) toast("Showed " + b + " in Finder");
+    else if (l.kind === "folder") toast("Opened " + b + " in Finder");
+    else if (RUN_EXT.indexOf(ext(l.target)) >= 0) toast("Showed " + b + " in Finder. Scripts are never opened");
+    else toast("Opened " + b);
+  }, function () { toast("Couldn’t reach the hub"); });
+}
+function setArchived(l, on) {
+  api("POST", "/api/links/" + enc(l.slug) + "/archive", { archived: on }).then(function () {
+    toast(on ? "Archived " + l.slug + ". It still works" : "Restored " + l.slug, "Undo", function () {
+      api("POST", "/api/links/" + enc(l.slug) + "/archive", { archived: !on }).then(reload, function (e) { toast(e.message); });
+    });
+    return reload();
+  }, function (e) { toast(e.message); });
+}
+function setKept(l, on) {
+  api("POST", "/api/links/" + enc(l.slug) + "/keep", { kept: on }).then(function () {
+    toast(on ? "Kept " + l.slug + " forever" : "Stopped keeping " + l.slug + ". It can be archived again", "Undo", function () {
+      api("POST", "/api/links/" + enc(l.slug) + "/keep", { kept: !on }).then(reload, function (e) { toast(e.message); });
+    });
+    return reload();
+  }, function (e) { toast(e.message); });
+}
+function saveNote(slug, note) {
+  api("POST", "/api/links/" + enc(slug) + "/note", { note: note }).then(function () {
+    toast(note ? "Saved the note" : "Removed the note");
+    return reload();
+  }, function (e) { toast(e.message); });
+}
+function ask(title, body, okLabel, list, fn) {
+  var d = $("confirm"), ul = $("c-list");
+  $("c-title").textContent = title;
+  $("c-body").textContent = body;
+  $("c-ok").textContent = okLabel;
+  ul.textContent = "";
+  ul.hidden = !list || !list.length;
+  (list || []).forEach(function (s) { ul.appendChild(el("li", null, s)); });
+  askFn = fn;
+  d.returnValue = "";
+  d.showModal();
+}
+function remove(l) {
+  ask("Delete " + l.slug + "?",
+    "The address stops opening " + (l.kind === "url" ? "the URL" : "the file") + " and shows “this link was removed” with the old path instead. The slug stays reserved, so it never points to anything else.",
+    "Delete", null, function () {
+      api("DELETE", "/api/links/" + enc(l.slug)).then(function () {
+        toast("Deleted " + l.slug + ". Its slug stays reserved");
+        return reload();
+      }, function (e) { toast(e.message); });
+    });
+}
+function prune() {
+  api("POST", "/api/prune", { dry_run: true }).then(function (j) {
+    var slugs = j.removed || [];
+    if (!slugs.length) { toast("Nothing to prune"); return; }
+    ask("Prune " + plural(slugs.length, "dead link") + "?",
+      "Their files no longer exist. Each becomes a tombstone: old links show “file no longer exists” with the old path, never another file, because the slug is never reused. Kept links are skipped.",
+      "Prune", slugs, function () {
+        api("POST", "/api/prune", { dry_run: false }).then(function (k) {
+          toast("Pruned " + plural((k.removed || slugs).length, "link") + ". Their slugs stay reserved");
+          return reload();
+        }, function (e) { toast(e.message); });
+      });
+  }, function (e) { toast(e.message); });
+}
+
+/* Edit and new link */
+function slugProblem(slug, self) {
+  if (!slug) return "Give it a slug.";
+  if (!/^[a-z0-9-]+$/.test(slug)) return "Slugs use lowercase letters, digits and hyphens only.";
+  if (slug === "o" || slug === "f" || slug === "api") return "o, f and api are reserved.";
+  var o = findLink(slug);
+  if (o && o !== self) {
+    if (!o.removed) return "There’s already a link called " + slug + ".";
+    if (o.removed.why === "renamed") return slug + " forwards to " + o.removed.to + " since a rename. Slugs are never reused.";
+    return slug + " belonged to a link removed on " + dateStr(o.removed.at) + ". Slugs are never reused, so an old copy of that link can’t open something else.";
+  }
+  return "";
+}
+function editMsg(err) {
+  var m = $("e-msg"), l = editing;
+  m.className = "msg" + (err ? " err" : "");
+  if (err) { m.textContent = err; return; }
+  var renamed = l && $("e-slug").value.trim() !== l.slug, retarget = l && $("e-target").value.trim() !== l.target;
+  var parts = [];
+  if (l && !l.kept && (renamed || retarget)) parts.push("A new slug or target keeps the link forever: it won’t be archived or pruned.");
+  if (renamed) parts.push("The old address, " + l.slug + ", will keep forwarding to the new one.");
+  m.textContent = parts.join(" ");
+}
+function edit(l) {
+  editing = l || null;
+  $("e-title").textContent = l ? "Edit " + l.slug : "New link";
+  $("e-slug").value = l ? l.slug : "";
+  $("e-target").value = l ? l.target : "";
+  $("e-note").value = l ? l.note : "";
+  $("e-phone").value = l ? l.phone : "";
+  $("e-phone-wrap").hidden = !!(l && l.kind === "url");
+  $("e-save").disabled = false;
+  editMsg();
+  $("edit").showModal();
+  focusQuiet(l ? $("e-target") : $("e-slug"));
+}
+function saveEdit(e) {
+  e.preventDefault();
+  var l = editing, slug = $("e-slug").value.trim(), target = $("e-target").value.trim();
+  var note = $("e-note").value.trim();
+  var phone = $("e-phone-wrap").hidden ? (l ? l.phone : "") : $("e-phone").value.trim();
+  var err = slugProblem(slug, l) || (target ? "" : "Add a path, or a URL with ://.") || (note.length > NOTE_MAX ? "Notes can be up to " + NOTE_MAX + " characters." : "");
+  if (err) { editMsg(err); return; }
+  var chain = Promise.resolve(), renamed = l && slug !== l.slug, retarget = !l || target !== l.target;
+  if (renamed) {
+    chain = chain.then(function () { return api("POST", "/api/links/" + enc(l.slug) + "/rename", { to: slug }); })
+      .then(function () { delete clickCache[l.slug]; if (openSlug === l.slug) openSlug = slug; });
+  }
+  if (retarget) {
+    // With a slug this makes or replaces a kept link, so send the phone page and note along with it.
+    var body = { slug: slug, target: target, origin: "manage" };
+    if (phone) body.phone = phone;
+    if (note) body.note = note;
+    chain = chain.then(function () { return api("POST", "/api/links", body); });
+  } else {
+    if (phone !== l.phone) chain = chain.then(function () { return api("POST", "/api/links/" + enc(slug) + "/phone", { url: phone }); });
+    if (note !== l.note) chain = chain.then(function () { return api("POST", "/api/links/" + enc(slug) + "/note", { note: note }); });
+  }
+  $("e-save").disabled = true;
+  chain.then(function () {
+    $("edit").close();
+    toast("Saved " + slug);
+    return reload();
+  }, function (er) {
+    $("e-save").disabled = false;
+    editMsg(er.message);
+    if (renamed) reload();
+  });
+}
+
+/* ---------- Events ---------- */
+function isTyping(t) { return t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable); }
+function trapFocus(e) {
+  var dr = $("drawer");
+  var f = Array.prototype.filter.call(dr.querySelectorAll("button, [href], input, select, [tabindex]"), function (x) {
+    return !x.disabled && x.tabIndex >= 0 && x.getClientRects().length > 0;
+  });
+  if (!f.length) return;
+  var first = f[0], last = f[f.length - 1];
+  if (!dr.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+  else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}
+
+function wire() {
+  $("q").addEventListener("input", renderList);
+  $("q").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { var first = visible(words())[0]; if (first) copyLink(first); else toast("Nothing to copy"); }
+    if (e.key === "Escape" && $("q").value) { e.preventDefault(); $("q").value = ""; renderList(); }
+  });
+  $("project").addEventListener("change", function () { view.project = $("project").value; renderList(); });
+  $("sort").addEventListener("change", function () { view.sort = $("sort").value; saveView(); renderList(); });
+  $("new").addEventListener("click", function () { edit(null); });
+  $("scrim").addEventListener("click", function () { closeDrawer(); });
+  $("d-close").addEventListener("click", function () { closeDrawer(); });
+  $("d-prev").addEventListener("click", function () { step(-1); });
+  $("d-next").addEventListener("click", function () { step(1); });
+  $("d-copy").addEventListener("click", function () { var l = findLink(openSlug); if (l) copyLink(l); });
+  $("e-form").addEventListener("submit", saveEdit);
+  $("e-cancel").addEventListener("click", function () { $("edit").close(); });
+  $("e-slug").addEventListener("input", function () { editMsg(); });
+  $("e-target").addEventListener("input", function () { editMsg(); });
+  $("confirm").addEventListener("close", function () {
+    var f = askFn;
+    askFn = null;
+    if ($("confirm").returnValue === "ok" && f) f();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (document.querySelector("dialog[open]")) return;
+    if (e.key === "Escape" && openSlug) { e.preventDefault(); closeDrawer(); return; }
+    if (e.key === "Tab" && openSlug) { trapFocus(e); return; }
+    if (e.key === "/" && !openSlug && !isTyping(e.target) && !$("app").hidden) { e.preventDefault(); $("q").focus(); }
+  });
+}
+
+function start() {
+  signIn().then(function (ok) { return ok ? load() : locked(); })
+    .catch(function (e) { if (e.message !== "Signed out") toast(e.message); });
+}
+
+document.querySelectorAll("[data-icon]").forEach(function (n) { n.replaceWith(icon(n.getAttribute("data-icon"))); });
+loadView();
+$("sort").value = view.sort;
+buildChips();
+wire();
+start();
+</script>
+</body>
+</html>

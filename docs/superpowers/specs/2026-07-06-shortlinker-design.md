@@ -1,7 +1,10 @@
 # shortlinker — design spec
 
 **Date:** 2026-07-06
-**Status:** Approved design, pre-implementation
+**Status:** Historical. This is the v1 design. Since then the hub has split
+into a public port and a local-only port, phones get files served, links
+live in two files (yours and sl-link's), and the local API needs a token.
+The README describes how shortlinker works now.
 
 ## Purpose
 
