@@ -183,6 +183,8 @@ for 12 hours; open it again from the menu or the command after that.
 
 ## Menu bar
 
+![shortlinker's menu: 9 links, 2 kept; Link Finder selection; Manage links…; Recently linked; Prune 1 dead link; Restart shortlinker; Open log](docs/menu-bar.png)
+
 `make swiftbar` adds a SwiftBar plugin with:
 
 - **Link Finder selection**: links what's selected in Finder and copies the
