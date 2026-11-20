@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -20,9 +21,17 @@ const usage = `usage: shortlinker [command]
 With no command, runs the server (see --help for its flags).
 
   link <path>...        print a link for each file or folder (same as sl-link)
-  ls [words...]         list links, or only those matching every word
-  rm <slug>...          delete links
-  mv <old> <new>        rename a link (its old address stops working)
+  ls [options] [words]  list links, or only those matching every word:
+                          --archived  include archived links
+                          --removed   include removed ones (tombstones)
+                          --unclicked only sl-link links nobody has clicked
+                          --project P only links in a project whose path contains P
+                          --older N   only links made more than N days ago
+                          --json      print JSON
+  rm <slug>...          delete links (their slugs are never given to another file)
+  mv <old> <new>        rename a link (the old address sends clicks on to the new one)
+  archive <slug>...     hide sl-link links from the lists (they still work)
+  restore <slug>...     bring archived links back
   copy <slug>           copy a link to the clipboard (--markdown for [name](link))
   manage                open the manage page in your browser
   prune [-n]            remove sl-link's links whose file is gone (-n: just list them)
@@ -44,6 +53,10 @@ func runCommand(args []string) (int, bool) {
 		return runList(rest, os.Stdout), true
 	case "rm":
 		return runRemove(rest), true
+	case "archive":
+		return runArchive(rest, true), true
+	case "restore":
+		return runArchive(rest, false), true
 	case "mv":
 		return runRename(rest), true
 	case "copy":
@@ -92,15 +105,18 @@ type listing struct {
 	Links []linkDetails `json:"links"`
 }
 
-func fetchListing(a api) (listing, error) {
+func fetchListing(a api) (listing, error) { return fetchListingWith(a, "") }
+
+// fetchListingWith adds query parameters, e.g. "&archived=1".
+func fetchListingWith(a api, extra string) (listing, error) {
 	var l listing
-	err := a.do(http.MethodGet, "/api/links?details=1", nil, &l)
+	err := a.do(http.MethodGet, "/api/links?details=1"+extra, nil, &l)
 	return l, err
 }
 
 // matches reports whether a link contains every word, ignoring case.
 func (d linkDetails) matches(words []string) bool {
-	hay := strings.ToLower(d.Slug + " " + d.Target)
+	hay := strings.ToLower(d.Slug + " " + d.Target + " " + d.Note + " " + d.Project)
 	for _, w := range words {
 		if !strings.Contains(hay, strings.ToLower(w)) {
 			return false
@@ -110,14 +126,40 @@ func (d linkDetails) matches(words []string) bool {
 }
 
 func runList(args []string, out io.Writer) int {
-	asJSON := false
+	var asJSON, unclicked bool
+	var project, extra string
+	olderDays := -1
 	var words []string
-	for _, a := range args {
-		switch a {
+	usage := func() int {
+		fmt.Fprintln(os.Stderr, "usage: shortlinker ls [--archived] [--removed] [--unclicked] [--project P] [--older DAYS] [--json] [words...]")
+		return exitError
+	}
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; a {
 		case "--json":
 			asJSON = true
+		case "--archived":
+			extra += "&archived=1"
+		case "--removed":
+			extra += "&removed=1"
+		case "--unclicked":
+			unclicked = true
+		case "--project", "--older":
+			if i+1 == len(args) {
+				return usage()
+			}
+			i++
+			if a == "--project" {
+				project = strings.ToLower(args[i])
+				break
+			}
+			n, err := strconv.Atoi(strings.TrimSuffix(args[i], "d"))
+			if err != nil || n < 0 {
+				return usage()
+			}
+			olderDays = n
 		case "-h", "--help":
-			fmt.Fprintln(os.Stderr, "usage: shortlinker ls [--json] [words...]")
+			usage()
 			return exitOK
 		default:
 			words = append(words, a)
@@ -127,13 +169,19 @@ func runList(args []string, out io.Writer) int {
 	if code != exitOK {
 		return code
 	}
-	l, err := fetchListing(a)
+	l, err := fetchListingWith(a, extra)
 	if err != nil {
 		return exitFor("ls", err)
 	}
 	found := []linkDetails{}
+	cutoff := time.Now().Add(-time.Duration(olderDays) * 24 * time.Hour)
 	for _, d := range l.Links {
-		if d.matches(words) {
+		switch {
+		case !d.matches(words):
+		case unclicked && (d.Source != "sl-link" || d.Clicks > 0):
+		case project != "" && !strings.Contains(strings.ToLower(d.Project), project):
+		case olderDays >= 0 && (d.Created == nil || d.Created.After(cutoff)):
+		default:
 			found = append(found, d)
 		}
 	}
@@ -152,10 +200,39 @@ func runList(args []string, out io.Writer) int {
 		if d.Kind == "missing" {
 			note = strings.TrimSpace(note + " missing")
 		}
+		switch {
+		case d.Removed != nil:
+			note = strings.TrimSpace(note + " removed")
+		case d.Archived != nil:
+			note = strings.TrimSpace(note + " archived")
+		}
+		if d.Clicks > 0 {
+			note = strings.TrimSpace(note + " " + plural(d.Clicks, "click"))
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\n", d.Slug, d.Target, note)
 	}
 	tw.Flush()
 	return exitOK
+}
+
+func runArchive(args []string, archived bool) int {
+	name := map[bool]string{true: "archive", false: "restore"}[archived]
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "usage: shortlinker %s <slug>...\n", name)
+		return exitError
+	}
+	a, _, code := commandAPI(name, 5*time.Second)
+	if code != exitOK {
+		return code
+	}
+	for _, slug := range args {
+		if err := a.do(http.MethodPost, "/api/links/"+slug+"/archive", map[string]bool{"archived": archived}, nil); err != nil {
+			code = maxExit(code, exitFor(name, err))
+			continue
+		}
+		fmt.Printf("%sd %s\n", name, slug)
+	}
+	return code
 }
 
 func runRemove(args []string) int {
@@ -189,7 +266,7 @@ func runRename(args []string) int {
 	if err := a.do(http.MethodPost, "/api/links/"+args[0]+"/rename", map[string]string{"to": args[1]}, nil); err != nil {
 		return exitFor("mv", err)
 	}
-	fmt.Printf("renamed %s to %s; links to %s no longer work\n", args[0], args[1], args[0])
+	fmt.Printf("renamed %s to %s; links to %s send clicks on to it\n", args[0], args[1], args[0])
 	return exitOK
 }
 

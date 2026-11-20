@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // newTestStore is a store whose links.txt holds content and which has no
@@ -16,19 +18,57 @@ func newTestStore(t *testing.T, content string) *Store {
 	return newSplitStore(t, content, "")
 }
 
-// newSplitStore is a store with your links and sl-link's.
+// newSplitStore is a store with your links and sl-link's. auto is written
+// like links.txt ("slug = target | phone" lines) and becomes records.
 func newSplitStore(t *testing.T, hand, auto string) *Store {
 	t.Helper()
 	dir := t.TempDir()
-	s := &Store{Path: filepath.Join(dir, "links.txt")}
-	for path, content := range map[string]string{s.Path: hand, s.autoPath(): auto} {
-		if content != "" {
-			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-				t.Fatal(err)
-			}
+	s := &Store{Path: filepath.Join(dir, "links.txt"), Now: func() time.Time { return testNow }}
+	if hand != "" {
+		if err := os.WriteFile(s.Path, []byte(hand), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if auto != "" {
+		entries, _ := parseEntries(auto)
+		var lines []string
+		for _, e := range entries {
+			b, _ := json.Marshal(Record{Slug: e.Slug, Target: e.Target, Phone: e.Phone, Created: testNow, Origin: "sl-link"})
+			lines = append(lines, string(b))
+		}
+		if err := os.WriteFile(s.autoPath(), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
 	return s
+}
+
+var testNow = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+
+// autoText is sl-link's links in use, written like links.txt.
+func autoText(t *testing.T, s *Store) string {
+	t.Helper()
+	entries, err := s.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		if e.Rec != nil {
+			b.WriteString(formatLine(e.Slug, e.Target, e.Phone) + "\n")
+		}
+	}
+	return b.String()
+}
+
+// recOf is slug's record, in any state.
+func recOf(t *testing.T, s *Store, slug string) *Record {
+	t.Helper()
+	e, ok, err := s.Find(slug)
+	if err != nil || !ok || e.Rec == nil {
+		t.Fatalf("no record for %q (ok=%v, err=%v)", slug, ok, err)
+	}
+	return e.Rec
 }
 
 func read(t *testing.T, path string) string {
@@ -48,7 +88,8 @@ func slugsOf(entries []Entry) string {
 	return strings.Join(s, ",")
 }
 
-var autoHead = strings.Join(autoHeader, "\n") + "\n"
+// autoHead was the comment at the top of sl-link's text file; records have none.
+const autoHead = ""
 
 func TestStoreAllMissingFiles(t *testing.T) {
 	s := newTestStore(t, "")
@@ -139,7 +180,7 @@ func TestStoreFilesArePrivate(t *testing.T) {
 	if err := s.Set("budget", "/x"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Ensure("/y/a.md", "/Users/test"); err != nil {
+	if _, _, err := s.Ensure("/y/a.md", "/Users/test", Meta{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{s.Path, s.autoPath()} {
@@ -196,7 +237,7 @@ func TestStoreSetMovesAnSlLinkToYours(t *testing.T) {
 	if got, want := read(t, s.Path), "budget = /b\nnotes-md = ~/x/notes.md | https://sb/notes\n"; got != want {
 		t.Errorf("links.txt = %q, want %q (the phone page kept: same file)", got, want)
 	}
-	if got, want := read(t, s.autoPath()), autoHead+"other-md = ~/x/other.md\n"; got != want {
+	if got, want := autoText(t, s), autoHead+"other-md = ~/x/other.md\n"; got != want {
 		t.Errorf("auto-links.txt = %q, want %q", got, want)
 	}
 	if l, _, _ := s.Lookup("notes-md"); l.Auto {
@@ -215,7 +256,7 @@ func TestStoreDelete(t *testing.T) {
 	if err := s.Delete("a-md"); err != nil {
 		t.Fatal(err)
 	}
-	if got := read(t, s.autoPath()); got != autoHead {
+	if got := autoText(t, s); got != autoHead {
 		t.Errorf("auto-links.txt = %q, want just the header", got)
 	}
 	if err := s.Delete("nope"); err == nil {
@@ -243,11 +284,11 @@ func TestStoreRename(t *testing.T) {
 
 func TestStoreEnsureNamesNewLinkAfterFile(t *testing.T) {
 	s := newTestStore(t, "budget = ~/Documents/budget.numbers\n")
-	slug, created, err := s.Ensure("~/Documents/quarterly-report-2.pdf", "/Users/test")
+	slug, created, err := s.Ensure("~/Documents/quarterly-report-2.pdf", "/Users/test", Meta{})
 	if err != nil || !created || slug != "quarterly-report-2-pdf" {
 		t.Fatalf("Ensure = %q, %v, %v", slug, created, err)
 	}
-	if got, want := read(t, s.autoPath()), autoHead+"quarterly-report-2-pdf = ~/Documents/quarterly-report-2.pdf\n"; got != want {
+	if got, want := autoText(t, s), autoHead+"quarterly-report-2-pdf = ~/Documents/quarterly-report-2.pdf\n"; got != want {
 		t.Errorf("auto-links.txt = %q, want %q", got, want)
 	}
 	if got := read(t, s.Path); got != "budget = ~/Documents/budget.numbers\n" {
@@ -258,7 +299,7 @@ func TestStoreEnsureNamesNewLinkAfterFile(t *testing.T) {
 func TestStoreEnsureReusesExistingLinkForSamePath(t *testing.T) {
 	s := newSplitStore(t, "budget = ~/Documents/budget.numbers\n", "money = /Users/test/Documents/budget.numbers\n")
 	for _, target := range []string{"~/Documents/budget.numbers", "/Users/test/Documents/./budget.numbers"} {
-		slug, created, err := s.Ensure(target, "/Users/test")
+		slug, created, err := s.Ensure(target, "/Users/test", Meta{})
 		if err != nil || created || slug != "budget" {
 			t.Errorf("Ensure(%q) = %q, %v, %v; want budget, false", target, slug, created, err)
 		}
@@ -279,7 +320,7 @@ func TestStoreEnsureAvoidsTakenAndReservedSlugs(t *testing.T) {
 		{"~/e/TODO.md", "todo-md"},
 		{"~/f/TODO.md", "f-todo-md"},
 	} {
-		slug, _, err := s.Ensure(c[0], "/Users/test")
+		slug, _, err := s.Ensure(c[0], "/Users/test", Meta{})
 		if err != nil || slug != c[1] {
 			t.Errorf("Ensure(%q) = %q, %v; want %q", c[0], slug, err, c[1])
 		}
@@ -289,7 +330,7 @@ func TestStoreEnsureAvoidsTakenAndReservedSlugs(t *testing.T) {
 func TestStoreEnsureRejectsURLsAndEmptyTargets(t *testing.T) {
 	s := newTestStore(t, "")
 	for _, target := range []string{"", "https://example.com"} {
-		if _, _, err := s.Ensure(target, "/Users/test"); err == nil {
+		if _, _, err := s.Ensure(target, "/Users/test", Meta{}); err == nil {
 			t.Errorf("Ensure(%q): want an error", target)
 		}
 	}
@@ -302,7 +343,7 @@ func TestStoreConcurrentWritesKeepEveryLink(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			if _, _, err := s.Ensure(fmt.Sprintf("~/f/file%d.md", i), "/Users/test"); err != nil {
+			if _, _, err := s.Ensure(fmt.Sprintf("~/f/file%d.md", i), "/Users/test", Meta{}); err != nil {
 				t.Error(err)
 			}
 		}()
@@ -327,19 +368,23 @@ func TestStorePruneAutoKeepsYoursAndLiveLinks(t *testing.T) {
 	}
 	auto := autoHead + "live = " + live + "\n# a note\ngone = /nope/gone.md\nurl = https://example.com\ngone-md = /nope/gone2.md | https://sb/gone\n"
 	s := newSplitStore(t, "hand = /nope/hand.md\n", auto)
+	before := autoText(t, s)
 	removed, err := s.PruneAuto("/Users/test", true)
 	if err != nil || strings.Join(removed, ",") != "gone,gone-md" {
 		t.Fatalf("dry run = %v, %v", removed, err)
 	}
-	if read(t, s.autoPath()) != auto {
-		t.Errorf("dry run changed the file")
+	if autoText(t, s) != before {
+		t.Errorf("dry run changed the links")
 	}
 	if removed, err = s.PruneAuto("/Users/test", false); err != nil || strings.Join(removed, ",") != "gone,gone-md" {
 		t.Fatalf("prune = %v, %v", removed, err)
 	}
-	want := autoHead + "live = " + live + "\n# a note\nurl = https://example.com\n"
-	if got := read(t, s.autoPath()); got != want {
+	want := autoHead + "live = " + live + "\nurl = https://example.com\n"
+	if got := autoText(t, s); got != want {
 		t.Errorf("file =\n%s\nwant\n%s", got, want)
+	}
+	if r := recOf(t, s, "gone"); r.Removed == nil || r.Removed.Why != "pruned" {
+		t.Errorf("gone should be a tombstone marked pruned, got %+v", r.Removed)
 	}
 	if read(t, s.Path) != "hand = /nope/hand.md\n" {
 		t.Error("prune touched links.txt")
@@ -417,7 +462,7 @@ func TestStorePhonePages(t *testing.T) {
 	if l, _, _ := s.Lookup("pipe"); l.Target != "~/a | b.md" || l.Phone != "" {
 		t.Errorf("a path with \" | \" was split: %+v", l)
 	}
-	if slug, created, _ := s.Ensure("/Users/test/x/notes.md", "/Users/test"); slug != "notes-md" || created {
+	if slug, created, _ := s.Ensure("/Users/test/x/notes.md", "/Users/test", Meta{}); slug != "notes-md" || created {
 		t.Errorf("Ensure matched %q, created = %v; want notes-md", slug, created)
 	}
 	if err := s.Set("notes-md", "~/x/other.md"); err != nil {
@@ -441,14 +486,14 @@ func TestStoreMigrateMovesTheOldSection(t *testing.T) {
 	before := "# mine\nbudget = ~/b.numbers\n\n" + oldMarker + "\na-md = ~/x/a.md\n# a note\nb-md = ~/x/b.md | https://sb/b\nBad Line\n"
 	s := newTestStore(t, before)
 	before2, _ := s.All()
-	moved, err := s.Migrate()
+	moved, _, err := s.Migrate("/Users/test")
 	if err != nil || moved != 2 {
 		t.Fatalf("Migrate = %d, %v; want 2", moved, err)
 	}
 	if got := read(t, s.Path); got != "# mine\nbudget = ~/b.numbers\n" {
 		t.Errorf("links.txt = %q", got)
 	}
-	if got, want := read(t, s.autoPath()), autoHead+"a-md = ~/x/a.md\n# a note\nb-md = ~/x/b.md | https://sb/b\nBad Line\n"; got != want {
+	if got, want := autoText(t, s), autoHead+"a-md = ~/x/a.md\nb-md = ~/x/b.md | https://sb/b\n"; got != want {
 		t.Errorf("auto-links.txt = %q, want %q", got, want)
 	}
 	if got := read(t, s.Path+".before-split"); got != before {
@@ -468,7 +513,7 @@ func TestStoreMigrateMovesTheOldSection(t *testing.T) {
 	if l, _, _ := s.Lookup("a-md"); !l.Auto {
 		t.Error("a-md isn't sl-link's after the move")
 	}
-	if moved, err := s.Migrate(); err != nil || moved != 0 {
+	if moved, _, err := s.Migrate("/Users/test"); err != nil || moved != 0 {
 		t.Errorf("second Migrate = %d, %v; want 0", moved, err)
 	}
 }
@@ -477,11 +522,11 @@ func TestStoreMigrateMovesTheOldSection(t *testing.T) {
 // both holding the links; running again finishes without duplicating them.
 func TestStoreMigrateFinishesAHalfDoneRun(t *testing.T) {
 	s := newSplitStore(t, "budget = /b\n\n"+oldMarker+"\na-md = /a.md\nb-md = /b.md\n", autoHead+"a-md = /a.md\n")
-	moved, err := s.Migrate()
+	moved, _, err := s.Migrate("/Users/test")
 	if err != nil || moved != 1 {
 		t.Fatalf("Migrate = %d, %v; want 1 (b-md)", moved, err)
 	}
-	if got, want := read(t, s.autoPath()), autoHead+"a-md = /a.md\nb-md = /b.md\n"; got != want {
+	if got, want := autoText(t, s), autoHead+"a-md = /a.md\nb-md = /b.md\n"; got != want {
 		t.Errorf("auto-links.txt = %q, want %q", got, want)
 	}
 	if got := read(t, s.Path); got != "budget = /b\n" {

@@ -37,12 +37,13 @@ See [Menu bar](#menu-bar).
 
 ## Your links and sl-link's
 
-Links live in two plain-text files in `~/.config/shortlinker/`:
+Links live in two files in `~/.config/shortlinker/`:
 
-- **`links.txt`** is yours. Edit it by hand; changes take effect immediately,
-  no restart.
-- **`auto-links.txt`** is sl-link's (below). shortlinker rewrites it; don't
-  edit it by hand.
+- **`links.txt`** is yours, in plain text. Edit it by hand; changes take
+  effect immediately, no restart.
+- **`auto-links.jsonl`** is sl-link's (below): one record per link, with
+  when it was made, by which agent session, in which project, and how often
+  it's been clicked. shortlinker writes it; don't edit it while the hub runs.
 
 ```
 # slug = target      (:// → redirect, otherwise a file or folder path)
@@ -56,9 +57,9 @@ reserved. A slug can only be used once across both files; if the same slug
 is in both, yours wins.
 
 Which file a link is in matters: sl-link's links are served sandboxed (see
-[Security model](#security-model)) and `shortlinker prune` can remove them.
-Naming a link yourself, through the API or the manage page, moves it to
-`links.txt`.
+[Security model](#security-model)), archive when nobody uses them, and
+`shortlinker prune` can remove them. Naming a link yourself, through the API
+or the manage page, moves it to `links.txt`, where it stays for good.
 
 ## A link for any file: `sl-link`
 
@@ -79,6 +80,10 @@ good replacement for `file://` links, which many apps don't open.
 - `--markdown` prints `[report.pdf](https://…/report-pdf)`.
 - `--copy` also copies the links; `--selection` links what's selected in
   Finder.
+- `--note "why"` saves a note with a new link, shown in the manage page.
+- sl-link records which agent session made a link, from `SHORTLINKER_SESSION`
+  or Claude Code's `CLAUDE_CODE_SESSION_ID`, so you can find the
+  conversation it came from.
 - The address it prints comes from `SHORTLINKER_URL`, else
   `~/.config/shortlinker/url`. The first run fills that file in from this
   Mac's tailnet name, which takes several seconds once: the macOS `tailscale`
@@ -107,16 +112,45 @@ page can also be set through the API: `POST /api/links/<slug>/phone
 All run on the hub Mac.
 
     shortlinker ls [words...]     # list links, or those matching every word
+    shortlinker ls --unclicked --older 14 --project my-app
+    shortlinker ls --archived     # include archived links (--removed: tombstones)
     shortlinker rm <slug>...      # delete links
-    shortlinker mv <old> <new>    # rename (the old address stops working)
+    shortlinker mv <old> <new>    # rename (the old address sends clicks on)
+    shortlinker archive <slug>... # hide sl-link links from the lists
+    shortlinker restore <slug>... # bring them back
     shortlinker copy <slug>       # copy a link (--markdown for [name](link))
     shortlinker manage            # open the manage page
     shortlinker prune -n          # list sl-link's links whose file is gone
     shortlinker prune             # remove them
 
-`prune` only touches sl-link's links. A removed slug can be given to a
-different file later, so an old link to a deleted file may then show the new
-one.
+`prune` only touches sl-link's links. A removed link's slug is never given to
+another file: an old link shows "This link was removed", never someone
+else's file. Linking the same file again brings its old link back.
+
+## What shortlinker records
+
+For each sl-link link: when it was made, how (`sl-link`, `finder`, `api` or
+`manage`), the git project its file is in (the main checkout, even for a file
+in a worktree), the agent session that made it, an optional note, how many
+times it's been linked, and its clicks.
+
+Each click on a short link goes in `clicks.jsonl`: the time, the slug, which
+tailnet device clicked (Tailscale names it), whether it was a Mac or a phone,
+what the click did, and the referring site's origin (`https://www.notion.so`,
+never the full URL). Clicks on your own links are logged too.
+
+**Archiving.** An sl-link link nobody clicks within 30 days of being made, or
+that goes 180 days without a click, is archived: it's hidden from `ls`, the
+manage page and the menu, but it still works, and a click or linking the file
+again brings it back. Your links never archive. The hub checks once an hour.
+
+DuckDB reads both files directly, for questions like how many links get
+clicked at all:
+
+    duckdb -c "SELECT route, count(*) FROM read_json('~/.config/shortlinker/clicks.jsonl') GROUP BY route"
+
+See [the design](docs/superpowers/specs/2026-11-19-link-records-design.md)
+for what's recorded and why, and what deliberately isn't.
 
 ## Manage page
 
@@ -157,13 +191,22 @@ token, which the hub writes to `~/.config/shortlinker/token` on first start:
     # {"created":true,"phone":"","slug":"report-pdf","target":"~/Documents/report.pdf"}
     curl -X DELETE -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7778/api/links/budget
 
-Also: `POST /api/links/<slug>/rename {"to": "new"}`, `POST
-/api/links/<slug>/phone {"url": "..."}` and `POST /api/prune {"dry_run": true}`.
-Leaving out the slug, as in the second POST, does what sl-link does. Delete
-the token file and restart the hub to change the token.
+Leaving out the slug, as in the second POST, does what sl-link does; it also
+takes `origin`, `session` and `note`. Also:
+
+- `GET /api/links?details=1&archived=1&removed=1`: every link with its record
+- `GET /api/links/<slug>/clicks`: a link's clicks, newest first
+- `GET /api/stats`: counts, and the last 30 days of clicks by device and site
+- `POST /api/links/<slug>/archive {"archived": true}` (or `false` to restore)
+- `POST /api/links/<slug>/rename {"to": "new"}`
+- `POST /api/links/<slug>/phone {"url": "..."}`
+- `POST /api/prune {"dry_run": true}`
+
+Delete the token file and restart the hub to change the token.
 
 ## How a click works
 
+- Every click is logged (see [What shortlinker records](#what-shortlinker-records)).
 - Deep link / URL target → 302 straight to the target (Mac + iOS).
 - File/folder target → 302 to `http://localhost:7778/o/<slug>`, handled by
   the clicking Mac's own opener, which runs `open`. Apps, scripts, installers
@@ -178,6 +221,8 @@ the token file and restart the hub to change the token.
   serves the files beneath it, `index.html` if there is one, or a listing.
   Markdown, scripts and other text files show as plain text. Any device can
   open `/f/<slug>` directly to read a file instead of opening it.
+- Renamed link → 302 to its new slug. Removed link → 410, "This link was
+  removed".
 
 ## Security model
 
@@ -198,8 +243,9 @@ the token file and restart the hub to change the token.
 - **Web pages.** 7778 refuses any Host but `localhost` and `127.0.0.1` (DNS
   rebinding), and its API refuses requests from other sites' pages (a
   `Sec-Fetch-Site` of `cross-site` or `same-site`) and bodies that aren't
-  JSON. 7777 refuses any Host but loopback and `*.ts.net`, so a rebinding page
-  in a browser on the hub can't read files or ask what a slug points to.
+  JSON. 7777 refuses any Host but loopback and this hub's own tailnet name
+  (from its saved address or from Tailscale), so a rebinding page in a browser
+  on the hub can't read files or ask what a slug points to.
 - **Opening.** `open` only ever runs on targets of registered slugs, and only
   on full paths. Any web page can send your browser to
   `localhost:7778/o/<slug>`, so targets that would run code are shown in
@@ -216,17 +262,28 @@ the token file and restart the hub to change the token.
   linked in `links.txt` is trusted and keeps a normal origin, so pages that
   save settings in `localStorage` still work. PDFs, images and text aren't
   sandboxed: they can't run script on this origin.
-- **Files.** `links.txt`, `auto-links.txt` and the token are readable by you
-  only, and the link files are replaced atomically (temporary file, then
-  rename), so a click during a save or a crash never sees half a file.
+- **Files.** `links.txt`, `auto-links.jsonl`, `clicks.jsonl` and the token
+  are readable by you only, and the link files are replaced atomically
+  (temporary file, then rename), so a click during a save or a crash never
+  sees half a file.
+- **Click details are statistics, not proof.** The device comes from the
+  `X-Forwarded-For` header `tailscale serve` adds, and anything on the hub Mac
+  can send its own. Nothing uses it to decide access.
 
-## Upgrading from one links file
+## Upgrading
 
-Before sl-link had a file of its own, its links sat at the end of `links.txt`
-under a `# Added by sl-link` line. The hub moves them to `auto-links.txt` when
-it starts, with every slug unchanged, and keeps the old file as
-`links.txt.before-split`. Older versions also saved `links.txt` readable by
-every account on the Mac; the hub makes it private.
+The hub brings older layouts up to date when it starts, with every slug,
+target and phone page unchanged:
+
+- Before sl-link had a file of its own, its links sat at the end of
+  `links.txt` under a `# Added by sl-link` line. They move to
+  `auto-links.jsonl`, and the old file is kept as `links.txt.before-split`.
+- Then sl-link had `auto-links.txt`, a text file. Its links move to
+  `auto-links.jsonl`, and it's kept as `auto-links.txt.before-records`.
+
+Moved links are dated the day they move, so nothing archives for 30 days.
+Older versions also saved `links.txt` readable by every account on the Mac;
+the hub makes it private.
 
 ## Troubleshooting
 

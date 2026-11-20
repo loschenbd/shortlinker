@@ -1,7 +1,9 @@
 # Link records: what shortlinker should remember
 
 **Date:** 2026-11-19
-**Status:** Proposal
+**Status:** Built on 2026-11-19. Two additions while building: clicks also
+record the routes `renamed` (sent on to the new slug) and `removed` (a
+tombstone answered), and the API gives each link an `archives_at` time.
 
 ## Why
 

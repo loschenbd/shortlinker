@@ -167,7 +167,7 @@ func TestRelinkGivesAnEarlierLinkItsSilverBulletPage(t *testing.T) {
 	defer local.Close()
 	hub := api{base: local.URL, token: testToken, client: local.Client()}
 	o := linkOptions{home: home, hubURL: "https://hub.example.ts.net",
-		register:  func(target string) (string, string, error) { return postLink(hub, target) },
+		register:  func(target string) (string, string, error) { return postLink(hub, target, Meta{Origin: "sl-link"}) },
 		phonePage: phonePageFor("sb-link"),
 		savePhone: func(slug, url string) error { return postPhone(hub, slug, url) },
 	}
@@ -223,36 +223,36 @@ func TestPostLinkAndPhoneAgainstHubAndAgent(t *testing.T) {
 	hubHTTP := httptest.NewServer(hubSrv.LocalHandler())
 	defer hubHTTP.Close()
 	hub := api{base: hubHTTP.URL, token: testToken, client: hubHTTP.Client()}
-	slug, phone, err := postLink(hub, "~/Documents/notes.md")
+	slug, phone, err := postLink(hub, "~/Documents/notes.md", Meta{Origin: "sl-link"})
 	if err != nil || slug != "notes-md" || phone != "" {
 		t.Errorf("hub: postLink = %q, %q, %v; want notes-md and no phone page", slug, phone, err)
 	}
 	if err := postPhone(hub, "notes-md", "https://hub.example.ts.net:3000/notes"); err != nil {
 		t.Fatalf("postPhone: %v", err)
 	}
-	if _, phone, _ := postLink(hub, "~/Documents/notes.md"); phone != "https://hub.example.ts.net:3000/notes" {
+	if _, phone, _ := postLink(hub, "~/Documents/notes.md", Meta{Origin: "sl-link"}); phone != "https://hub.example.ts.net:3000/notes" {
 		t.Errorf("relink: phone = %q, want the saved page", phone)
 	}
 	if err := postPhone(hub, "notes-md", "javascript:alert(1)"); err == nil {
 		t.Error("postPhone accepted a non-http URL")
 	}
-	if _, _, err := postLink(hub, "https://example.com"); err == nil || !strings.Contains(err.Error(), "hub refused") {
+	if _, _, err := postLink(hub, "https://example.com", Meta{Origin: "sl-link"}); err == nil || !strings.Contains(err.Error(), "hub refused") {
 		t.Errorf("hub, URL target: err = %v, want hub refused", err)
 	}
 
-	if _, _, err := postLink(api{base: hub.base, token: "wrong", client: hub.client}, "~/x.md"); err == nil || !strings.Contains(err.Error(), "token") {
+	if _, _, err := postLink(api{base: hub.base, token: "wrong", client: hub.client}, "~/x.md", Meta{}); err == nil || !strings.Contains(err.Error(), "token") {
 		t.Errorf("wrong token: err = %v, want the hub to ask for its token", err)
 	}
 
 	agentHTTP := httptest.NewServer(NewServer(nil, hubHTTP.URL, "7778", "/Users/test").LocalHandler())
 	defer agentHTTP.Close()
 	agent := api{base: agentHTTP.URL, token: testToken, client: agentHTTP.Client()}
-	if _, _, err := postLink(agent, "~/x.md"); !errors.Is(err, errNoAPI) {
+	if _, _, err := postLink(agent, "~/x.md", Meta{Origin: "sl-link"}); !errors.Is(err, errNoAPI) {
 		t.Errorf("agent: err = %v, want errNoAPI", err)
 	}
 
 	agentHTTP.Close()
-	if _, _, err := postLink(api{base: agentHTTP.URL, client: http.DefaultClient}, "~/x.md"); !errors.Is(err, errUnreachable) {
+	if _, _, err := postLink(api{base: agentHTTP.URL, client: http.DefaultClient}, "~/x.md", Meta{}); !errors.Is(err, errUnreachable) {
 		t.Errorf("closed: err = %v, want errUnreachable", err)
 	}
 }

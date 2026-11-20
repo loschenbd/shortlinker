@@ -34,3 +34,12 @@ const listingPage = `<!doctype html>
 <h1 style="font-size:1.2rem;word-break:break-word">%s</h1><ul>
 %s</ul>
 `
+
+// gonePage is returned for a removed link. The %s is the escaped path it
+// pointed to. Its slug is never given to another file, so this is all an
+// old link can ever show.
+const gonePage = `<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Link removed</title>
+<body style="font-family:-apple-system,sans-serif;max-width:32rem;margin:0 auto;padding:20vh 16px 0;text-align:center;color:#333;line-height:1.5">
+<h1 style="font-size:1.3rem">This link was removed</h1><p>It pointed to <code style="word-break:break-all">%s</code>, which no longer has a link.</p>
+`

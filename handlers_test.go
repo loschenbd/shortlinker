@@ -78,7 +78,7 @@ func send(srv *Server, method, url, body string, headers ...string) *httptest.Re
 func route(srv *Server, req *http.Request) http.Handler {
 	p := req.URL.Path
 	if strings.HasPrefix(p, "/o/") || strings.HasPrefix(p, "/api/links") || p == "/manage" ||
-		p == "/api/prune" || p == "/api/manage-code" || p == "/api/session" {
+		p == "/api/prune" || p == "/api/manage-code" || p == "/api/session" || p == "/api/stats" {
 		return srv.LocalHandler()
 	}
 	return srv.PublicHandler()

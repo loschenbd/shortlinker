@@ -59,10 +59,11 @@ type Link struct {
 	Auto   bool   // made by sl-link: it lives in sl-link's file, not links.txt
 }
 
-// Entry is a link with its slug.
+// Entry is a link with its slug, and for sl-link's links, their record.
 type Entry struct {
 	Slug string
 	Link
+	Rec *Record // a copy of sl-link's record; nil for your links
 }
 
 // phoneSep separates a target from its phone page:

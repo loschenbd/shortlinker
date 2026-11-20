@@ -37,6 +37,10 @@ Linking the same path again gives the same link. Run it on the hub Mac.
   --copy        also copy the links to the clipboard
   --markdown    print (and copy) [name](link) instead of the bare link
   --notify      say what happened in a notification (for menu bar use)
+  --note TEXT   save why the link was made; shows in the manage page
+
+The link records which agent session made it, from SHORTLINKER_SESSION or
+Claude Code's CLAUDE_CODE_SESSION_ID, so the manage page can lead back to it.
 
 A Markdown file can get a page phones open instead of plain text: sl-link
 runs the command in SHORTLINKER_PHONE_CMD (default sb-link, a SilverBullet
@@ -141,8 +145,21 @@ func runLink(args []string) int {
 	var o linkOptions
 	var selection, copyOut, notify bool
 	var paths []string
-	for _, a := range args {
+	meta := Meta{Origin: "sl-link", Session: agentSession()}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if v, ok := strings.CutPrefix(a, "--note="); ok {
+			meta.Note = v
+			continue
+		}
 		switch a {
+		case "--note":
+			if i+1 == len(args) {
+				fmt.Fprintln(os.Stderr, "sl-link: --note needs some text")
+				return exitError
+			}
+			i++
+			meta.Note = args[i]
 		case "-h", "--help":
 			fmt.Fprint(os.Stderr, linkUsage)
 			return exitOK
@@ -168,6 +185,7 @@ func runLink(args []string) int {
 		return code
 	}
 	if selection {
+		meta.Origin = "finder"
 		sel, err := finderSelection()
 		if err != nil {
 			return fail(exitError, err)
@@ -194,7 +212,7 @@ func runLink(args []string) int {
 		return fail(exitError, err)
 	}
 	o.home, o.hubURL = home, hubURL
-	o.register = func(target string) (string, string, error) { return postLink(hub, target) }
+	o.register = func(target string) (string, string, error) { return postLink(hub, target, meta) }
 	o.phonePage = phonePageFor(phoneCommand())
 	o.phoneLabel = phonePageLabel(phoneCommand())
 	o.savePhone = func(slug, url string) error { return postPhone(hub, slug, url) }
@@ -375,18 +393,28 @@ func firstLine(s string) string {
 	return s
 }
 
-func postLink(a api, target string) (slug, phone string, err error) {
+func postLink(a api, target string, meta Meta) (slug, phone string, err error) {
 	var result struct {
 		Slug  string `json:"slug"`
 		Phone string `json:"phone"`
 	}
-	if err := a.do(http.MethodPost, "/api/links", map[string]string{"target": target}, &result); err != nil {
+	body := map[string]string{"target": target, "origin": meta.Origin, "session": meta.Session, "note": meta.Note}
+	if err := a.do(http.MethodPost, "/api/links", body, &result); err != nil {
 		return "", "", err
 	}
 	if result.Slug == "" {
 		return "", "", fmt.Errorf("hub sent no slug")
 	}
 	return result.Slug, result.Phone, nil
+}
+
+// agentSession is the agent session running sl-link, if it says:
+// SHORTLINKER_SESSION, else Claude Code's CLAUDE_CODE_SESSION_ID.
+func agentSession() string {
+	if s := os.Getenv("SHORTLINKER_SESSION"); s != "" {
+		return s
+	}
+	return os.Getenv("CLAUDE_CODE_SESSION_ID")
 }
 
 func postPhone(a api, slug, url string) error {
@@ -425,11 +453,7 @@ func publicHubURL(home string) (string, error) {
 }
 
 func tailnetURL() (string, error) {
-	bin, err := exec.LookPath("tailscale")
-	if err != nil {
-		bin = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-	}
-	out, err := exec.Command(bin, "status", "--json", "--peers=false").Output()
+	out, err := exec.Command(tailscaleBin(), "status", "--json", "--peers=false").Output()
 	if err != nil {
 		return "", fmt.Errorf("can't read this Mac's tailnet name (set SHORTLINKER_URL): %v", err)
 	}

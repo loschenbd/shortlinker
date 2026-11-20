@@ -38,10 +38,15 @@ func main() {
 	var store *Store
 	if *hub == "" {
 		store = &Store{Path: *links}
-		if moved, err := store.Migrate(); err != nil {
-			log.Fatalf("moving sl-link's links out of %s: %v", *links, err)
-		} else if moved > 0 {
-			log.Printf("moved %d sl-link links from %s to %s (the old file is %s.before-split)", moved, *links, store.autoPath(), *links)
+		fromLinks, fromText, err := store.Migrate(home)
+		if err != nil {
+			log.Fatalf("moving sl-link's links into %s: %v", store.autoPath(), err)
+		}
+		if fromLinks > 0 {
+			log.Printf("moved %d sl-link links from %s to %s (the old file is %s.before-split)", fromLinks, *links, store.autoPath(), *links)
+		}
+		if fromText > 0 {
+			log.Printf("moved %d sl-link links from %s to %s (the old file is %s.before-records)", fromText, store.legacyAutoPath(), store.autoPath(), store.legacyAutoPath())
 		}
 		store.Tighten()
 	}
@@ -55,6 +60,20 @@ func main() {
 		if savedHubURL(home) == "" {
 			go publicHubURL(home) // fills ~/.config/shortlinker/url for the manage page's links
 		}
+		srv.devices = &devices{}
+		go func() { // hourly: device names, and the retention pass
+			for {
+				if err := srv.devices.refresh(); err != nil {
+					log.Printf("can't name tailnet devices yet: %v", err)
+				}
+				if archived, err := store.Archive(); err != nil {
+					log.Printf("archiving unused sl-link links: %v", err)
+				} else if len(archived) > 0 {
+					log.Printf("archived %d sl-link links nobody used (they still work, and come back when clicked)", len(archived))
+				}
+				time.Sleep(time.Hour)
+			}
+		}()
 	}
 
 	serve := func(addr string, h http.Handler) error {
