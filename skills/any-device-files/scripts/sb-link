@@ -1,0 +1,50 @@
+#!/bin/sh
+# sb-link: print the SilverBullet URL of a Markdown or code file, so shortlinker
+# can give the file's link a phone page where it opens in SilverBullet's editor.
+#
+# The spaces are listed in ~/.config/sb-link/spaces (or $SB_LINK_CONFIG):
+#   url=https://<mac>.<tailnet>.ts.net:8443
+#   <prefix>=<folder>          one line per SilverBullet space: its URL prefix
+#                              (without the slash) and its folder
+# Lines starting with # are skipped. A file inside nested spaces gets the
+# innermost one.
+#
+# Prints the URL and exits 0, or says why on stderr and exits 1. shortlinker's
+# hub finds this script by name in ~/.local/bin and runs it once per new link.
+set -eu
+
+conf="${SB_LINK_CONFIG:-$HOME/.config/sb-link/spaces}"
+[ $# -eq 1 ] || { echo "usage: sb-link <file>" >&2; exit 1; }
+[ -f "$conf" ] || { echo "sb-link: no space list at $conf" >&2; exit 1; }
+[ -f "$1" ] || { echo "sb-link: no such file: $1" >&2; exit 1; }
+
+dir=$(cd "$(dirname "$1")" && pwd -P)
+file="$dir/$(basename "$1")"
+
+base="" best="" bestlen=0 rel=""
+while IFS='=' read -r key val || [ -n "$key" ]; do
+  case "$key" in
+    '' | '#'*) continue ;;
+    url) base=${val%/}; continue ;;
+  esac
+  # shellcheck disable=SC2088 # a literal "~/" written in the list, expanded here
+  case "$val" in "~/"*) val="$HOME/${val#\~/}" ;; esac
+  folder=$(cd "$val" 2>/dev/null && pwd -P) || continue
+  case "$file" in
+    "$folder"/*)
+      if [ ${#folder} -gt "$bestlen" ]; then
+        best=$key bestlen=${#folder} rel=${file#"$folder"/}
+      fi ;;
+  esac
+done < "$conf"
+
+[ -n "$base" ] || { echo "sb-link: $conf has no url= line" >&2; exit 1; }
+[ -n "$best" ] || { echo "sb-link: $file is in none of the spaces in $conf" >&2; exit 1; }
+case "/$rel" in
+  */.*) echo "sb-link: SilverBullet doesn't show files in dot-folders" >&2; exit 1 ;;
+esac
+
+# A Markdown page's URL drops .md; a code file keeps its extension.
+case "$rel" in *.md) rel=${rel%.md} ;; esac
+rel=$(printf '%s' "$rel" | sed -e 's/%/%25/g' -e 's/ /%20/g' -e 's/#/%23/g' -e 's/?/%3F/g')
+printf '%s/%s/%s\n' "$base" "$best" "$rel"
