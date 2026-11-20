@@ -2,10 +2,12 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func main() {
@@ -14,13 +16,8 @@ func main() {
 	if filepath.Base(os.Args[0]) == "sl-link" {
 		os.Exit(runLink(os.Args[1:]))
 	}
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "link":
-			os.Exit(runLink(os.Args[2:]))
-		case "prune":
-			os.Exit(runPrune(os.Args[2:]))
-		}
+	if code, ok := runCommand(os.Args[1:]); ok {
+		os.Exit(code)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -28,25 +25,49 @@ func main() {
 	}
 	var (
 		port      = flag.String("port", "7777", "public port, the one `tailscale serve` publishes (hub role, loopback only)")
-		localPort = flag.String("local-port", defaultLocalPort, "local-only port for opening files and changing links (never publish it)")
-		links     = flag.String("links", filepath.Join(home, ".config", "shortlinker", "links.txt"), "path to links file (hub role)")
+		localPort = flag.String("local-port", defaultLocalPort, "local-only port for opening files and the link API (never publish it)")
+		links     = flag.String("links", filepath.Join(configDir(home), "links.txt"), "path to your links file (hub role); sl-link's file, "+AutoFile+", sits next to it")
 		hub       = flag.String("hub", "", "hub base URL, e.g. https://mac.tailnet.ts.net; setting this runs an opener agent only")
 	)
+	flag.Usage = func() {
+		fmt.Fprint(os.Stderr, usage+"\nServer flags:\n")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	var store *Store
 	if *hub == "" {
 		store = &Store{Path: *links}
+		if moved, err := store.Migrate(); err != nil {
+			log.Fatalf("moving sl-link's links out of %s: %v", *links, err)
+		} else if moved > 0 {
+			log.Printf("moved %d sl-link links from %s to %s (the old file is %s.before-split)", moved, *links, store.autoPath(), *links)
+		}
+		store.Tighten()
 	}
 	srv := NewServer(store, *hub, *localPort, home)
+	if store != nil {
+		token, err := loadOrCreateToken(tokenPath(home))
+		if err != nil {
+			log.Fatalf("hub token: %v", err)
+		}
+		srv.auth = newAPIAuth(token)
+		if savedHubURL(home) == "" {
+			go publicHubURL(home) // fills ~/.config/shortlinker/url for the manage page's links
+		}
+	}
 
+	serve := func(addr string, h http.Handler) error {
+		s := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+		return s.ListenAndServe()
+	}
 	local := "127.0.0.1:" + *localPort
 	errc := make(chan error, 2)
-	go func() { errc <- http.ListenAndServe(local, srv.LocalHandler()) }()
+	go func() { errc <- serve(local, srv.LocalHandler()) }()
 	if store != nil {
 		public := "127.0.0.1:" + *port
-		go func() { errc <- http.ListenAndServe(public, srv.PublicHandler()) }()
-		log.Printf("shortlinker hub on http://%s (public) and http://%s (local only; links: %s)", public, local, *links)
+		go func() { errc <- serve(public, srv.PublicHandler()) }()
+		log.Printf("shortlinker hub on http://%s (public) and http://%s (local only; links: %s, %s)", public, local, *links, store.autoPath())
 	} else {
 		log.Printf("shortlinker agent on http://%s (hub: %s)", local, *hub)
 	}

@@ -5,32 +5,30 @@ import (
 	"testing"
 )
 
-func TestParseLinks(t *testing.T) {
+func TestParseEntries(t *testing.T) {
 	content := `
 # comment
 budget = ~/Documents/Finance/2026-budget.numbers
 daily  = obsidian://daily?vault=Main
+notes-md = ~/notes.md | https://sb.example/notes
 
 bad line without equals
 UPPER = /tmp/x
 empty-target =
 o = /tmp/reserved
+budget = /a/second/budget
 `
-	links, warnings := ParseLinks(content)
-	want := map[string]string{
-		"budget": "~/Documents/Finance/2026-budget.numbers",
-		"daily":  "obsidian://daily?vault=Main",
+	entries, warnings := parseEntries(content)
+	var got []string
+	for _, e := range entries {
+		got = append(got, e.Slug+"="+e.Target+"|"+e.Phone)
 	}
-	if len(links) != len(want) {
-		t.Fatalf("got %d links (%v), want %d", len(links), links, len(want))
+	want := "budget=~/Documents/Finance/2026-budget.numbers|,daily=obsidian://daily?vault=Main|,notes-md=~/notes.md|https://sb.example/notes"
+	if strings.Join(got, ",") != want {
+		t.Errorf("entries = %v\nwant %s", got, want)
 	}
-	for slug, target := range want {
-		if links[slug] != target {
-			t.Errorf("links[%q] = %q, want %q", slug, links[slug], target)
-		}
-	}
-	if len(warnings) != 4 {
-		t.Errorf("got %d warnings (%v), want 4", len(warnings), warnings)
+	if len(warnings) != 5 || !strings.Contains(warnings[4], `"budget" is already defined on line 3`) {
+		t.Errorf("got %d warnings (%v), want 4 malformed lines and 1 repeat", len(warnings), warnings)
 	}
 }
 

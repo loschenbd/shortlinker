@@ -1,3 +1,3 @@
 module github.com/loschenbd/shortlinker
 
-go 1.26.4
+go 1.24

@@ -13,6 +13,9 @@ import (
 
 const testLinks = "budget = ~/Documents/budget.numbers\ndaily = obsidian://daily?vault=Main\n"
 
+// testToken is the hub token test servers use; get and send pass it.
+const testToken = "test-token"
+
 const desktopUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 const iphoneUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
@@ -20,7 +23,14 @@ const iphoneUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWe
 // instead of executing /usr/bin/open.
 func newTestServer(t *testing.T, content string) (*Server, *[]string) {
 	t.Helper()
-	srv := NewServer(newTestStore(t, content), "", "7778", "/Users/test")
+	return newTestServerFor(t, newTestStore(t, content))
+}
+
+func newTestServerFor(t *testing.T, store *Store) (*Server, *[]string) {
+	t.Helper()
+	srv := NewServer(store, "", "7778", "/Users/test")
+	srv.auth = newAPIAuth(testToken)
+	srv.publicURL = func() string { return "https://hub.example.ts.net" }
 	opened := &[]string{}
 	srv.open = func(target string) error {
 		*opened = append(*opened, target)
@@ -36,6 +46,27 @@ func newTestServer(t *testing.T, content string) (*Server, *[]string) {
 func get(srv *Server, url, userAgent string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("GET", url, nil)
 	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	rec := httptest.NewRecorder()
+	route(srv, req).ServeHTTP(rec, req)
+	return rec
+}
+
+// send makes an API call with the token and, if body isn't "", a JSON body.
+// headers are name, value pairs that override those.
+func send(srv *Server, method, url, body string, headers ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, url, strings.NewReader(body))
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	for i := 0; i+1 < len(headers); i += 2 {
+		if headers[i+1] == "" {
+			req.Header.Del(headers[i])
+		} else {
+			req.Header.Set(headers[i], headers[i+1])
+		}
+	}
 	rec := httptest.NewRecorder()
 	route(srv, req).ServeHTTP(rec, req)
 	return rec
@@ -46,7 +77,8 @@ func get(srv *Server, url, userAgent string) *httptest.ResponseRecorder {
 // one. TestPublicPortHasNoLocalRoutes checks the split itself.
 func route(srv *Server, req *http.Request) http.Handler {
 	p := req.URL.Path
-	if strings.HasPrefix(p, "/o/") || strings.HasPrefix(p, "/api/links") || p == "/api/prune" {
+	if strings.HasPrefix(p, "/o/") || strings.HasPrefix(p, "/api/links") || p == "/manage" ||
+		p == "/api/prune" || p == "/api/manage-code" || p == "/api/session" {
 		return srv.LocalHandler()
 	}
 	return srv.PublicHandler()
@@ -54,7 +86,7 @@ func route(srv *Server, req *http.Request) http.Handler {
 
 func TestShortlinkRedirectsSchemeTargets(t *testing.T) {
 	srv, _ := newTestServer(t, testLinks)
-	rec := get(srv, "http://hub.ts.example/daily", desktopUA)
+	rec := get(srv, "http://hub.example.ts.net/daily", desktopUA)
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
@@ -65,7 +97,7 @@ func TestShortlinkRedirectsSchemeTargets(t *testing.T) {
 
 func TestShortlinkBouncesFileTargetsToLocalhost(t *testing.T) {
 	srv, _ := newTestServer(t, testLinks)
-	rec := get(srv, "http://hub.ts.example/budget", desktopUA)
+	rec := get(srv, "http://hub.example.ts.net/budget", desktopUA)
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
@@ -76,7 +108,7 @@ func TestShortlinkBouncesFileTargetsToLocalhost(t *testing.T) {
 
 func TestShortlinkSendsMobileFileTargetsToServe(t *testing.T) {
 	srv, _ := newTestServer(t, testLinks)
-	rec := get(srv, "http://hub.ts.example/budget", iphoneUA)
+	rec := get(srv, "http://hub.example.ts.net/budget", iphoneUA)
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
@@ -87,7 +119,7 @@ func TestShortlinkSendsMobileFileTargetsToServe(t *testing.T) {
 
 func TestShortlinkUnknownSlug404(t *testing.T) {
 	srv, _ := newTestServer(t, testLinks)
-	rec := get(srv, "http://hub.ts.example/nope", desktopUA)
+	rec := get(srv, "http://hub.example.ts.net/nope", desktopUA)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
 	}
@@ -140,7 +172,7 @@ func TestOpenReportsOpenFailure(t *testing.T) {
 
 func TestResolveEndpoint(t *testing.T) {
 	srv, _ := newTestServer(t, testLinks)
-	rec := get(srv, "http://hub.ts.example/api/resolve/budget", desktopUA)
+	rec := get(srv, "http://hub.example.ts.net/api/resolve/budget", desktopUA)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -151,7 +183,7 @@ func TestResolveEndpoint(t *testing.T) {
 	if body.Slug != "budget" || body.Target != "~/Documents/budget.numbers" {
 		t.Errorf("body = %+v", body)
 	}
-	if rec := get(srv, "http://hub.ts.example/api/resolve/nope", desktopUA); rec.Code != http.StatusNotFound {
+	if rec := get(srv, "http://hub.example.ts.net/api/resolve/nope", desktopUA); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown slug status = %d, want 404", rec.Code)
 	}
 }
@@ -205,11 +237,7 @@ func TestAPILinksList(t *testing.T) {
 
 func TestAPILinksAddRejectsNonJSONContentType(t *testing.T) {
 	srv, _ := newTestServer(t, testLinks)
-	body := strings.NewReader(`{"slug":"proj","target":"~/Code/my-app"}`)
-	req := httptest.NewRequest("POST", "http://127.0.0.1:7778/api/links", body)
-	req.Header.Set("Content-Type", "text/plain")
-	rec := httptest.NewRecorder()
-	route(srv, req).ServeHTTP(rec, req)
+	rec := send(srv, "POST", "http://127.0.0.1:7778/api/links", `{"slug":"proj","target":"~/Code/my-app"}`, "Content-Type", "text/plain")
 	if rec.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("status = %d, want 415", rec.Code)
 	}
@@ -227,11 +255,7 @@ func TestAPILinksAddRejectsNonJSONContentType(t *testing.T) {
 
 func TestAPILinksAdd(t *testing.T) {
 	srv, _ := newTestServer(t, testLinks)
-	body := strings.NewReader(`{"slug":"proj","target":"~/Code/my-app"}`)
-	req := httptest.NewRequest("POST", "http://127.0.0.1:7778/api/links", body)
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	route(srv, req).ServeHTTP(rec, req)
+	rec := send(srv, "POST", "http://127.0.0.1:7778/api/links", `{"slug":"proj","target":"~/Code/my-app"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
 	}
@@ -249,10 +273,7 @@ func TestAPILinksAddInvalid(t *testing.T) {
 		`{"slug":"ok","target":""}`,
 		`not json`,
 	} {
-		req := httptest.NewRequest("POST", "http://127.0.0.1:7778/api/links", strings.NewReader(payload))
-		req.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		route(srv, req).ServeHTTP(rec, req)
+		rec := send(srv, "POST", "http://127.0.0.1:7778/api/links", payload)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("payload %q: status = %d, want 400", payload, rec.Code)
 		}
@@ -261,18 +282,14 @@ func TestAPILinksAddInvalid(t *testing.T) {
 
 func TestAPILinksDelete(t *testing.T) {
 	srv, _ := newTestServer(t, testLinks)
-	req := httptest.NewRequest("DELETE", "http://127.0.0.1:7778/api/links/budget", nil)
-	rec := httptest.NewRecorder()
-	route(srv, req).ServeHTTP(rec, req)
+	rec := send(srv, "DELETE", "http://127.0.0.1:7778/api/links/budget", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	if _, ok, _ := srv.store.Get("budget"); ok {
 		t.Error("budget still present after delete")
 	}
-	req = httptest.NewRequest("DELETE", "http://127.0.0.1:7778/api/links/nope", nil)
-	rec = httptest.NewRecorder()
-	route(srv, req).ServeHTTP(rec, req)
+	rec = send(srv, "DELETE", "http://127.0.0.1:7778/api/links/nope", "")
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("unknown slug status = %d, want 404", rec.Code)
 	}
@@ -281,10 +298,7 @@ func TestAPILinksDelete(t *testing.T) {
 func TestAPILinksAddWithoutSlugPicksOne(t *testing.T) {
 	srv, _ := newTestServer(t, testLinks)
 	post := func(payload string) (int, map[string]any) {
-		req := httptest.NewRequest("POST", "http://127.0.0.1:7778/api/links", strings.NewReader(payload))
-		req.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		route(srv, req).ServeHTTP(rec, req)
+		rec := send(srv, "POST", "http://127.0.0.1:7778/api/links", payload)
 		var result map[string]any
 		json.Unmarshal(rec.Body.Bytes(), &result)
 		return rec.Code, result
@@ -331,6 +345,13 @@ func TestPublicPortHasNoLocalRoutes(t *testing.T) {
 	}
 	if links, _ := srv.store.All(); len(links) != 2 {
 		t.Errorf("links changed from the public port: %v", links)
+	}
+	// A DNS-rebinding page in a browser on the hub can't even ask what a
+	// slug points to.
+	for _, url := range []string{"http://rebind.example:7777/api/resolve/budget", "http://rebind.example:7777/budget"} {
+		if rec := get(srv, url, desktopUA); rec.Code != http.StatusForbidden {
+			t.Errorf("GET %s: status = %d, want 403", url, rec.Code)
+		}
 	}
 }
 
@@ -386,12 +407,9 @@ func TestAPIPrune(t *testing.T) {
 	if err := os.WriteFile(kept, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	srv, _ := newTestServer(t, "gone-by-hand = /nope/hand.md\n\n"+autoMarker+"\nkept-md = "+kept+"\ngone-md = /nope/gone.md\n")
+	srv, _ := newTestServerFor(t, newSplitStore(t, "gone-by-hand = /nope/hand.md\n", "kept-md = "+kept+"\ngone-md = /nope/gone.md\n"))
 	prune := func(body string) (int, string) {
-		req := httptest.NewRequest("POST", "http://127.0.0.1:7778/api/prune", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		route(srv, req).ServeHTTP(rec, req)
+		rec := send(srv, "POST", "http://127.0.0.1:7778/api/prune", body)
 		return rec.Code, strings.TrimSpace(rec.Body.String())
 	}
 	if code, body := prune(`{"dry_run":true}`); code != http.StatusOK || body != `{"dry_run":true,"removed":["gone-md"]}` {
@@ -403,8 +421,7 @@ func TestAPIPrune(t *testing.T) {
 	if code, body := prune(`{}`); code != http.StatusOK || body != `{"dry_run":false,"removed":["gone-md"]}` {
 		t.Errorf("prune: %d %s", code, body)
 	}
-	links, _ := srv.store.All()
-	if _, ok := links["gone-md"]; ok || len(links) != 2 {
+	if links, _ := srv.store.All(); slugsOf(links) != "gone-by-hand,kept-md" {
 		t.Errorf("after prune: %v, want gone-by-hand and kept-md", links)
 	}
 }
@@ -416,7 +433,7 @@ func TestShortlinkSendsPhonesToPhonePage(t *testing.T) {
 		{"plain", iphoneUA, "/f/plain"},
 		{"notes", desktopUA, "http://localhost:7778/o/notes"},
 	} {
-		rec := get(srv, "http://hub.ts.example/"+c.slug, c.ua)
+		rec := get(srv, "http://hub.example.ts.net/"+c.slug, c.ua)
 		if rec.Code != http.StatusFound || rec.Header().Get("Location") != c.want {
 			t.Errorf("%s: %d -> %q, want 302 -> %q", c.slug, rec.Code, rec.Header().Get("Location"), c.want)
 		}
@@ -425,11 +442,11 @@ func TestShortlinkSendsPhonesToPhonePage(t *testing.T) {
 
 func TestFinderLinkShowsFileInFinder(t *testing.T) {
 	srv, opened := newTestServer(t, testLinks)
-	rec := get(srv, "http://hub.ts.example/budget?finder", desktopUA)
+	rec := get(srv, "http://hub.example.ts.net/budget?finder", desktopUA)
 	if loc := rec.Header().Get("Location"); loc != "http://localhost:7778/o/budget?reveal=1" {
 		t.Errorf("Mac: Location = %q", loc)
 	}
-	if loc := get(srv, "http://hub.ts.example/budget?finder", iphoneUA).Header().Get("Location"); loc != "/f/budget" {
+	if loc := get(srv, "http://hub.example.ts.net/budget?finder", iphoneUA).Header().Get("Location"); loc != "/f/budget" {
 		t.Errorf("phone: Location = %q, want /f/budget", loc)
 	}
 	rec = get(srv, "http://localhost:7778/o/budget?reveal=1", desktopUA)
@@ -437,6 +454,149 @@ func TestFinderLinkShowsFileInFinder(t *testing.T) {
 		t.Errorf("/o/?reveal=1: %d %q", rec.Code, rec.Body.String())
 	}
 	if strings.Join(*opened, ",") != "reveal /Users/test/Documents/budget.numbers" {
+		t.Errorf("opened = %v", *opened)
+	}
+}
+
+func TestAPINeedsTheToken(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	for _, c := range []struct {
+		name, auth string
+		want       int
+	}{
+		{"no token", "", http.StatusUnauthorized},
+		{"wrong token", "Bearer nope", http.StatusUnauthorized},
+		{"token", "Bearer " + testToken, http.StatusOK},
+	} {
+		for _, call := range []struct{ method, url, body string }{
+			{"GET", "http://127.0.0.1:7778/api/links", ""},
+			{"POST", "http://127.0.0.1:7778/api/links", `{"target":"/etc/hosts"}`},
+			{"POST", "http://127.0.0.1:7778/api/prune", `{"dry_run":true}`},
+		} {
+			rec := send(srv, call.method, call.url, call.body, "Authorization", c.auth)
+			if rec.Code != c.want {
+				t.Errorf("%s: %s %s = %d, want %d", c.name, call.method, call.url, rec.Code, c.want)
+			}
+		}
+	}
+	// Without the token nothing was added: only the call with it did.
+	if links, _ := srv.store.All(); slugsOf(links) != "budget,daily,hosts" {
+		t.Errorf("links = %s", slugsOf(links))
+	}
+	// A hub that loaded no token refuses everything.
+	srv.auth = nil
+	if rec := send(srv, "GET", "http://127.0.0.1:7778/api/links", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token loaded: status = %d, want 401", rec.Code)
+	}
+}
+
+func TestAPIRefusesOtherSitesEvenWithTheToken(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	for _, site := range []string{"cross-site", "same-site"} {
+		if rec := send(srv, "DELETE", "http://localhost:7778/api/links/budget", "", "Sec-Fetch-Site", site); rec.Code != http.StatusForbidden {
+			t.Errorf("DELETE from a %s page: status = %d, want 403", site, rec.Code)
+		}
+		if rec := send(srv, "POST", "http://localhost:7778/api/session", `{"code":"x"}`, "Sec-Fetch-Site", site); rec.Code != http.StatusForbidden {
+			t.Errorf("session from a %s page: status = %d, want 403", site, rec.Code)
+		}
+	}
+	if _, ok, _ := srv.store.Get("budget"); !ok {
+		t.Error("budget was deleted by a web page")
+	}
+}
+
+func TestManagePageSignsInWithAOneTimeCode(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	page := get(srv, "http://localhost:7778/manage", desktopUA)
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "<title>shortlinker</title>") || strings.Contains(page.Body.String(), testToken) {
+		t.Fatalf("manage page: %d, has the token: %v", page.Code, strings.Contains(page.Body.String(), testToken))
+	}
+	if csp := page.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("CSP = %q", csp)
+	}
+
+	var code struct{ Code, URL string }
+	json.Unmarshal(send(srv, "POST", "http://127.0.0.1:7778/api/manage-code", "{}").Body.Bytes(), &code)
+	if code.Code == "" || code.URL != "http://localhost:7778/manage#code="+code.Code {
+		t.Fatalf("code = %+v", code)
+	}
+	trade := func(c string) *httptest.ResponseRecorder {
+		return send(srv, "POST", "http://localhost:7778/api/session", `{"code":"`+c+`"}`, "Authorization", "", "Sec-Fetch-Site", "same-origin")
+	}
+	rec := trade(code.Code)
+	var sess struct{ Session string }
+	json.Unmarshal(rec.Body.Bytes(), &sess)
+	if rec.Code != http.StatusOK || sess.Session == "" {
+		t.Fatalf("trading the code: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := trade(code.Code); rec.Code != http.StatusUnauthorized {
+		t.Errorf("the code worked twice: %d", rec.Code)
+	}
+	// The page's calls are same-origin and carry the session.
+	if rec := send(srv, "GET", "http://localhost:7778/api/links?details=1", "", "Authorization", "Bearer "+sess.Session, "Sec-Fetch-Site", "same-origin"); rec.Code != http.StatusOK {
+		t.Errorf("with the session: %d %s", rec.Code, rec.Body.String())
+	}
+	// A session can't mint codes, so it can't outlive itself.
+	if rec := send(srv, "POST", "http://127.0.0.1:7778/api/manage-code", "{}", "Authorization", "Bearer "+sess.Session); rec.Code != http.StatusForbidden {
+		t.Errorf("code from a session: %d, want 403", rec.Code)
+	}
+	if rec := send(srv, "POST", "http://127.0.0.1:7778/api/manage-code", "{}", "Authorization", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("code with no token: %d, want 401", rec.Code)
+	}
+}
+
+func TestAPIListDetails(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.md")
+	os.WriteFile(file, nil, 0o644)
+	srv, _ := newTestServerFor(t, newSplitStore(t, "web = https://example.com\nfolder = "+dir+"\n", "a-md = "+file+" | https://sb/a\ngone-md = /nope/gone.md\n"))
+	rec := get(srv, "http://127.0.0.1:7778/api/links?details=1", desktopUA)
+	var l listing
+	if err := json.Unmarshal(rec.Body.Bytes(), &l); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, d := range l.Links {
+		got = append(got, d.Slug+":"+d.Source+":"+d.Kind+":"+d.Phone)
+	}
+	want := "web:yours:url:,folder:yours:folder:,a-md:sl-link:file:https://sb/a,gone-md:sl-link:missing:"
+	if l.Hub != "https://hub.example.ts.net" || strings.Join(got, ",") != want {
+		t.Errorf("hub = %q, links = %v\nwant %s", l.Hub, got, want)
+	}
+}
+
+func TestAPIRename(t *testing.T) {
+	srv, _ := newTestServer(t, testLinks)
+	if rec := send(srv, "POST", "http://127.0.0.1:7778/api/links/budget/rename", `{"to":"money"}`); rec.Code != http.StatusOK {
+		t.Fatalf("rename: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := get(srv, "http://hub.example.ts.net/money", desktopUA); rec.Header().Get("Location") != "http://localhost:7778/o/money" {
+		t.Errorf("new slug: %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	if rec := send(srv, "POST", "http://127.0.0.1:7778/api/links/money/rename", `{"to":"daily"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("rename onto a taken slug: %d, want 400", rec.Code)
+	}
+}
+
+func TestOpenRefusesTargetsThatArentFullPaths(t *testing.T) {
+	srv, opened := newTestServer(t, "rel = Documents/x.pdf\nflag = -a Calculator\nweb = https://example.com\nhome = ~\n")
+	for _, slug := range []string{"rel", "flag", "web"} {
+		if rec := get(srv, "http://localhost:7778/o/"+slug, desktopUA); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", slug, rec.Code)
+		}
+	}
+	if rec := get(srv, "http://localhost:7778/o/home", desktopUA); rec.Code != http.StatusOK {
+		t.Errorf("~: status = %d, want 200", rec.Code)
+	}
+	if strings.Join(*opened, ",") != "/Users/test" {
+		t.Errorf("opened = %v, want only the home folder", *opened)
+	}
+}
+
+func TestOpenShowsFilelocInFinder(t *testing.T) {
+	srv, opened := newTestServer(t, "loc = ~/Desktop/thing.fileloc\n")
+	get(srv, "http://localhost:7778/o/loc", desktopUA)
+	if strings.Join(*opened, ",") != "reveal /Users/test/Desktop/thing.fileloc" {
 		t.Errorf("opened = %v", *opened)
 	}
 }

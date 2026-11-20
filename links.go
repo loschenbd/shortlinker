@@ -52,11 +52,17 @@ func ExpandPath(target, home string) string {
 	return target
 }
 
-// Link is one parsed line of links.txt.
+// Link is one link: a line of links.txt or of sl-link's file.
 type Link struct {
 	Target string // a URL to redirect to, or a file/folder path
 	Phone  string // optional page phones get instead of the file (a SilverBullet page)
-	Auto   bool   // made by sl-link: below autoMarker
+	Auto   bool   // made by sl-link: it lives in sl-link's file, not links.txt
+}
+
+// Entry is a link with its slug.
+type Entry struct {
+	Slug string
+	Link
 }
 
 // phoneSep separates a target from its phone page:
@@ -87,39 +93,56 @@ func formatLine(slug, target, phone string) string {
 	return slug + " = " + target
 }
 
-// ParseLinks parses links.txt content into slug→target. Blank lines and
-// #-comments are ignored; malformed lines are skipped with a warning.
-func ParseLinks(content string) (map[string]string, []string) {
-	entries, warnings := parseEntries(content)
-	links := make(map[string]string, len(entries))
-	for slug, l := range entries {
-		links[slug] = l.Target
+type lineKind int
+
+const (
+	lineOther lineKind = iota // blank or a # comment
+	lineLink                  // slug = target
+	lineBad                   // anything else: skipped with a warning, never rewritten
+)
+
+// parseLine reads one line of a links file. Every read and every edit goes
+// through it, so a line is a link to all of them or to none.
+func parseLine(line string) (string, Link, lineKind) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", Link{}, lineOther
 	}
-	return links, warnings
+	slug, raw, ok := strings.Cut(trimmed, "=")
+	slug = strings.TrimSpace(slug)
+	target, phone := splitTarget(strings.TrimSpace(raw))
+	if !ok || target == "" || !ValidSlug(slug) {
+		return "", Link{}, lineBad
+	}
+	return slug, Link{Target: target, Phone: phone}, lineLink
 }
 
-// parseEntries is ParseLinks with each link's phone page and section.
-func parseEntries(content string) (map[string]Link, []string) {
-	links := map[string]Link{}
+// parseEntries parses a links file into its links, in file order. When a
+// slug appears twice the first line wins, the same line edits change.
+// Malformed lines and repeated slugs come back as warnings.
+func parseEntries(content string) ([]Entry, []string) {
+	var entries []Entry
 	var warnings []string
-	auto := false
+	seen := map[string]int{}
 	for i, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if isAutoMarker(trimmed) {
-			auto = true
-			continue
-		}
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		slug, raw, ok := strings.Cut(trimmed, "=")
-		slug = strings.TrimSpace(slug)
-		target, phone := splitTarget(strings.TrimSpace(raw))
-		if !ok || target == "" || !ValidSlug(slug) {
+		slug, l, kind := parseLine(line)
+		switch kind {
+		case lineBad:
 			warnings = append(warnings, fmt.Sprintf("line %d: skipping malformed line: %q", i+1, line))
-			continue
+		case lineLink:
+			if first, dup := seen[slug]; dup {
+				warnings = append(warnings, fmt.Sprintf("line %d: %q is already defined on line %d; skipping this one", i+1, slug, first))
+				continue
+			}
+			seen[slug] = i + 1
+			entries = append(entries, Entry{Slug: slug, Link: l})
 		}
-		links[slug] = Link{Target: target, Phone: phone, Auto: auto}
 	}
-	return links, warnings
+	return entries, warnings
+}
+
+// isAutoMarker matches the comment that used to start sl-link's section of
+// links.txt, before sl-link got a file of its own (see Store.Migrate).
+func isAutoMarker(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "# Added by sl-link")
 }

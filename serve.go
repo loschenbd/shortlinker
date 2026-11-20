@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/fs"
 	"mime"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,36 +15,12 @@ import (
 	"time"
 )
 
-// allowedServeHost reports whether a /f/ request arrived under a name this
-// hub answers to: loopback, or its tailnet name via `tailscale serve`. Any
-// other Host is a DNS-rebinding page trying to read files through a browser
-// on this Mac.
-func allowedServeHost(hostport string) bool {
-	host := hostport
-	if h, _, err := net.SplitHostPort(hostport); err == nil {
-		host = h
-	}
-	return host == "localhost" || host == "127.0.0.1" || strings.HasSuffix(host, ".ts.net")
-}
-
-// fromWebPage reports whether a request was sent by a web page (fetch or a
-// form) rather than curl, an agent, or a URL typed into the address bar.
-// Files served under /f/ share the API's origin, so pages must not be able
-// to change links.
-func fromWebPage(r *http.Request) bool {
-	site := r.Header.Get("Sec-Fetch-Site")
-	return site != "" && site != "none"
-}
-
 // handleServe serves a file/folder slug's contents over the tailnet (hub
 // role), so a phone can read what a Mac would open. A folder slug serves
 // the files beneath it and never above: os.Root refuses .. and symlinks that
 // leave the folder, and dot-paths (.git, .env) are never served or listed.
+// PublicHandler has already checked the Host.
 func (s *Server) handleServe(w http.ResponseWriter, r *http.Request) {
-	if !allowedServeHost(r.Host) {
-		http.Error(w, "forbidden host", http.StatusForbidden)
-		return
-	}
 	slug := r.PathValue("slug")
 	link, ok, err := s.store.Lookup(slug)
 	if err != nil {

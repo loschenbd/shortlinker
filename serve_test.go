@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,30 +157,6 @@ func TestShortlinkSendsMobileToServedFile(t *testing.T) {
 	}
 }
 
-func TestAPIRefusesWritesFromWebPages(t *testing.T) {
-	srv, _ := newTestServer(t, testLinks)
-	for _, site := range []string{"same-origin", "cross-site"} {
-		req := httptest.NewRequest("POST", "http://localhost:7778/api/links", strings.NewReader(`{"slug":"x","target":"/x"}`))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Sec-Fetch-Site", site)
-		rec := httptest.NewRecorder()
-		route(srv, req).ServeHTTP(rec, req)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("POST from %s page: status = %d, want 403", site, rec.Code)
-		}
-		req = httptest.NewRequest("DELETE", "http://localhost:7778/api/links/budget", nil)
-		req.Header.Set("Sec-Fetch-Site", site)
-		rec = httptest.NewRecorder()
-		route(srv, req).ServeHTTP(rec, req)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("DELETE from %s page: status = %d, want 403", site, rec.Code)
-		}
-	}
-	if _, ok, _ := srv.store.Get("budget"); !ok {
-		t.Error("budget was deleted by a web page")
-	}
-}
-
 func TestServeScriptsAsPlainText(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"app.ts", "run.sh"} {
@@ -214,13 +189,13 @@ func TestServeSandboxesScriptablePagesUnlessLinkedByHand(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	links := "hand = " + filepath.Join(dir, "hand.html") + "\n" +
-		"site = " + filepath.Join(dir, "site") + "\n\n" + autoMarker + "\n" +
-		"auto-html = " + filepath.Join(dir, "auto.html") + "\n" +
+	hand := "hand = " + filepath.Join(dir, "hand.html") + "\n" +
+		"site = " + filepath.Join(dir, "site") + "\n"
+	auto := "auto-html = " + filepath.Join(dir, "auto.html") + "\n" +
 		"auto-pdf = " + filepath.Join(dir, "auto.pdf") + "\n" +
 		"auto-svg = " + filepath.Join(dir, "auto.svg") + "\n" +
 		"noext = " + filepath.Join(dir, "noext") + "\n"
-	srv, _ := newTestServer(t, links)
+	srv, _ := newTestServerFor(t, newSplitStore(t, hand, auto))
 	for path, wantSandbox := range map[string]bool{
 		"/f/hand":            false, // a page linked by hand keeps its storage
 		"/f/auto-html":       true,

@@ -1,4 +1,4 @@
-.PHONY: build test install
+.PHONY: build test install swiftbar
 
 build:
 	go build -o bin/shortlinker .
@@ -9,3 +9,6 @@ test:
 
 install:
 	./install.sh
+
+swiftbar:
+	./install.sh swiftbar
