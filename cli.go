@@ -42,6 +42,7 @@ With no command, runs the server (see --help for its flags).
   copy <slug>           copy a link to the clipboard (--markdown for [name](link))
   manage                open the manage page in your browser (--print: print its address)
   prune [-n]            remove links that aren't kept whose file is gone (-n: just list them)
+  phone-pages [-n]      make the missing phone pages of Markdown links (-n: just count them)
   export                print every link as text: slug = target | phone page
   import [file]         add the links in a file (or stdin) in export's format, kept
   swiftbar [--nested]   print the SwiftBar menu (see README)
@@ -84,6 +85,8 @@ func runCommand(args []string) (int, bool) {
 		return runManage(rest), true
 	case "prune":
 		return runPrune(rest), true
+	case "phone-pages":
+		return runPhonePages(rest, os.Stdout), true
 	case "swiftbar":
 		return runSwiftbar(rest, os.Stdout), true
 	case "menu":
@@ -630,6 +633,76 @@ func runPrune(args []string) int {
 	if notify {
 		notifyUser(summary, strings.Join(result.Removed, ", "))
 	}
+	return exitOK
+}
+
+const phonePagesUsage = `usage: shortlinker phone-pages [-n]
+
+Makes the missing phone pages (SilverBullet pages) of links to Markdown
+and code files, as sl-link does for a new link. Run it after a time when they
+couldn't be made, such as while SilverBullet was down. It takes a few
+seconds a link. -n only counts them.
+`
+
+// runPhonePages asks the hub for the phone page of every Markdown or code
+// link that has none, one at a time, and says what happened to each.
+func runPhonePages(args []string, out io.Writer) int {
+	dryRun := false
+	for _, a := range args {
+		switch a {
+		case "-n", "--dry-run":
+			dryRun = true
+		case "-h", "--help":
+			fmt.Fprint(os.Stderr, phonePagesUsage)
+			return exitOK
+		default:
+			fmt.Fprint(os.Stderr, phonePagesUsage)
+			return exitError
+		}
+	}
+	a, _, code := commandAPI("phone-pages", 10*time.Second)
+	if code != exitOK {
+		return code
+	}
+	l, err := fetchListingWith(a, "&archived=1")
+	if err != nil {
+		return exitFor("phone-pages", err)
+	}
+	var todo []string
+	for _, d := range l.Links {
+		if d.Removed == nil && d.Phone == "" && d.Kind == "file" && getsPhonePage(d.Target) {
+			todo = append(todo, d.Slug)
+		}
+	}
+	if dryRun || len(todo) == 0 {
+		fmt.Fprintf(out, "%d link(s) to Markdown or code files have no phone page.\n", len(todo))
+		return exitOK
+	}
+	slow := a
+	slow.client = &http.Client{Timeout: phonePageTimeout + 15*time.Second}
+	made, label := 0, "phone page"
+	for _, slug := range todo {
+		reply, err := postPhonePage(slow, slug)
+		if reply.Label != "" {
+			label = reply.Label
+		}
+		switch {
+		case err != nil:
+			fmt.Fprintf(out, "  %s: %s\n", printable(slug), printable(err.Error()))
+			if errors.Is(err, errUnreachable) {
+				return exitUnreachable
+			}
+		case reply.Reason != "":
+			fmt.Fprintf(out, "  %s: %s\n", printable(slug), printable(reply.Reason))
+		case reply.Phone == "":
+			fmt.Fprintln(out, "This Mac has no phone-page command (sb-link), so there's nothing to make.")
+			return exitOK
+		default:
+			made++
+			fmt.Fprintf(out, "  %s: %s\n", printable(slug), printable(reply.Phone))
+		}
+	}
+	fmt.Fprintf(out, "Made %d of %d %ss.\n", made, len(todo), label)
 	return exitOK
 }
 

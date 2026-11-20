@@ -99,18 +99,22 @@ good replacement for `file://` links, which many apps don't open.
 - `sl-link` is a symlink to the binary; `shortlinker link <path>` does the
   same.
 
-**Phone pages for Markdown.** A phone opening a Markdown link gets plain text,
-unless the link has a phone page: a URL where the file can be read or edited,
-such as a SilverBullet page. sl-link finds one by running the command in
-`SHORTLINKER_PHONE_CMD` (default `sb-link`) with the file's path, once, and
-saves what it prints with the link:
+**Phone pages for Markdown and code.** A phone opening a Markdown or code
+link gets plain text, unless the link has a phone page: a URL where the file
+can be read or edited, such as a SilverBullet page. Code here means source
+and text files such as `.go`, `.py`, `.ts`, `.sh`, `.json`, `.yaml` and
+`.txt` (the list is `phonePageExts` in `phone.go`). HTML is left out, because
+on a phone it should render. sl-link asks the hub for one, and the hub runs
+`sb-link` (or the command in its `SHORTLINKER_PHONE_CMD`) with the file's
+path, once, and saves what it prints with the link:
 
     notes-md = ~/Documents/notes.md | https://<hub>.<tailnet>.ts.net:3000/notes
 
 The command should print the URL and exit 0, or exit non-zero with the reason
-on stderr; only exit 0 counts. Without such a command on the Mac nothing
+on stderr; only exit 0 counts. Without such a command on the hub nothing
 changes. When the command declines, sl-link says why on stderr and the link
-still works. Running sl-link on the file again fills in a missing page. The
+still works. Running sl-link on the file again fills in a missing page, and
+`shortlinker phone-pages` fills in every link's. The
 page can also be set through the API: `POST /api/links/<slug>/phone
 {"url": "https://..."}`.
 
@@ -132,6 +136,7 @@ All run on the hub Mac.
     shortlinker manage            # open the manage page
     shortlinker prune -n          # list links that aren't kept whose file is gone
     shortlinker prune             # remove them
+    shortlinker phone-pages       # make missing phone pages (Markdown, code)
     shortlinker export            # every link in the text format
     shortlinker import [file]     # add links from that format, kept
 
@@ -219,6 +224,7 @@ take `origin`, `session` and `note`. Also:
 - `POST /api/links/<slug>/archive {"archived": true}` (or `false` to restore)
 - `POST /api/links/<slug>/rename {"to": "new"}`
 - `POST /api/links/<slug>/phone {"url": "..."}`
+- `POST /api/links/<slug>/phone-page`: make a Markdown or code link's phone page
 - `POST /api/prune {"dry_run": true}`
 
 Delete the token file and restart the hub to change the token.
@@ -285,6 +291,13 @@ Delete the token file and restart the hub to change the token.
   `~/.config/shortlinker` (the token, the records, the click log, backups) is
   ever served, whatever is linked, even `~/.config` itself; such links still
   open on this Mac. Every response carries `X-Content-Type-Options: nosniff`.
+- **Phone pages.** `sb-link` reads SilverBullet's admin password from the
+  login Keychain, which only processes your desktop login started can
+  read. A terminal multiplexer started over SSH (as Moshi Desktop and
+  phones start one) can't, and neither can anything running in it. So the
+  hub, which launchd starts with your login, runs `sb-link`, one at a time
+  and for at most 30 seconds. Agents can ask for a page; they never see
+  the password.
 - **Sandboxing.** Served pages share one origin, so a page that runs script
   could read every other served file. Every HTML, SVG and XML file is served
   with `Content-Security-Policy: sandbox`: its scripts run, but in an opaque

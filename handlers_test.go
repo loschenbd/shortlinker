@@ -334,6 +334,7 @@ func TestPublicPortHasNoLocalRoutes(t *testing.T) {
 		{"POST", "http://localhost:7777/api/links/budget/keep", `{"kept":false}`},
 		{"POST", "http://localhost:7777/api/links/budget/note", `{"note":"x"}`},
 		{"POST", "http://localhost:7777/api/links/budget/archive", `{"archived":true}`},
+		{"POST", "http://localhost:7777/api/links/budget/phone-page", `{}`},
 		{"GET", "http://localhost:7777/api/links/budget/clicks", ""},
 		{"GET", "http://localhost:7777/api/stats", ""},
 		{"GET", "http://localhost:7777/api/hub-proof?n=" + strings.Repeat("a", 32), ""},

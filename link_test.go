@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -59,9 +60,9 @@ func TestLinkPathsPrintsOneLinkPerPath(t *testing.T) {
 	}
 }
 
-func TestLinkPathsGivesMarkdownASilverBulletPageOnce(t *testing.T) {
+func TestLinkPathsGivesMarkdownAndCodeASilverBulletPageOnce(t *testing.T) {
 	home := t.TempDir()
-	for _, name := range []string{"new.md", "has-page.md", "outside.md", "down.md", "notes.txt"} {
+	for _, name := range []string{"new.md", "has-page.md", "outside.md", "down.md", "main.go", "report.pdf"} {
 		if err := os.WriteFile(filepath.Join(home, name), nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -75,43 +76,45 @@ func TestLinkPathsGivesMarkdownASilverBulletPageOnce(t *testing.T) {
 			}
 			return SlugFromPath(target), "", nil
 		},
-		phonePage: func(abs string) (string, error) {
-			asked = append(asked, filepath.Base(abs))
-			switch filepath.Base(abs) {
-			case "outside.md":
-				return "", nil // no sb-link on this Mac: no page, nothing to say
-			case "down.md":
-				return "", errors.New("sb-link: exit status 4")
+		phonePage: func(slug string) (phonePageReply, error) {
+			asked = append(asked, slug)
+			switch slug {
+			case "outside-md":
+				return phonePageReply{Slug: slug}, nil // no sb-link on the hub: no page, nothing to say
+			case "down-md":
+				return phonePageReply{Slug: slug, Reason: "sb-link: exit status 4", Label: "SilverBullet page"}, nil
 			}
-			return "https://sb/" + filepath.Base(abs), nil
+			saved[slug] = "https://sb/" + slug
+			return phonePageReply{Slug: slug, Phone: saved[slug], Label: "SilverBullet page"}, nil
 		},
-		savePhone: func(slug, url string) error { saved[slug] = url; return nil },
 	}
 	var out, errOut bytes.Buffer
-	paths := []string{"new.md", "has-page.md", "outside.md", "down.md", "notes.txt"}
+	paths := []string{"new.md", "has-page.md", "outside.md", "down.md", "main.go", "report.pdf"}
 	for i := range paths {
 		paths[i] = filepath.Join(home, paths[i])
 	}
 	if code := linkPaths(paths, o, &out, &errOut); code != exitOK {
 		t.Errorf("code = %d, want 0 (the links work either way)", code)
 	}
-	if strings.Count(out.String(), "\n") != 5 {
-		t.Errorf("out = %q, want 5 links", out.String())
+	if strings.Count(out.String(), "\n") != 6 {
+		t.Errorf("out = %q, want 6 links", out.String())
 	}
-	if strings.Join(asked, ",") != "new.md,outside.md,down.md" {
-		t.Errorf("asked sb-link about %v; want only Markdown files with no page yet", asked)
+	if strings.Join(asked, ",") != "new-md,outside-md,down-md,main-go" {
+		t.Errorf("asked the hub about %v; want only Markdown and code files with no page yet", asked)
 	}
-	if len(saved) != 1 || saved["new-md"] != "https://sb/new.md" {
-		t.Errorf("saved = %v, want only new-md", saved)
+	if len(saved) != 2 || saved["new-md"] != "https://sb/new-md" || saved["main-go"] != "https://sb/main-go" {
+		t.Errorf("saved = %v, want new-md and main-go", saved)
 	}
-	if !strings.Contains(errOut.String(), "down.md: no SilverBullet page") {
-		t.Errorf("stderr = %q, want a note about down.md", errOut.String())
+	if !strings.Contains(errOut.String(), "down.md: no SilverBullet page, so phones get plain text: sb-link: exit status 4") ||
+		strings.Count(errOut.String(), "\n") != 1 {
+		t.Errorf("stderr = %q, want one note, about down.md", errOut.String())
 	}
 }
 
-// fakeSbLink puts an sb-link first on PATH that prints stdout, writes stderr
-// and exits with code, the way the real one reports a page or a refusal.
-func fakeSbLink(t *testing.T, code int, stdout, stderr string) {
+// fakeSbLink writes an sb-link that prints stdout, writes stderr and exits
+// with code, the way the real one reports a page or a refusal, and returns
+// its path for a server's phoneCmd.
+func fakeSbLink(t *testing.T, code int, stdout, stderr string) string {
 	t.Helper()
 	dir := t.TempDir()
 	for name, text := range map[string]string{"out.txt": stdout, "err.txt": stderr} {
@@ -120,31 +123,38 @@ func fakeSbLink(t *testing.T, code int, stdout, stderr string) {
 		}
 	}
 	script := fmt.Sprintf("#!/bin/sh\ncat \"%[1]s/out.txt\"\ncat \"%[1]s/err.txt\" >&2\nexit %[2]d\n", dir, code)
-	if err := os.WriteFile(filepath.Join(dir, "sb-link"), []byte(script), 0o755); err != nil {
+	bin := filepath.Join(dir, "sb-link")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", dir+":/usr/bin:/bin")
+	return bin
 }
 
 func TestSilverBulletPageSaysWhySbLinkMadeNoPage(t *testing.T) {
-	refusal := "sb-link: /p/.drafts/x.md is inside '.drafts/', which SilverBullet doesn't serve\n"
-	fakeSbLink(t, 2, "", refusal)
-	if url, err := phonePageFor("sb-link")("/p/.drafts/x.md"); url != "" || err == nil || !strings.Contains(err.Error(), "inside '.drafts/'") {
+	srv := NewServer(newTestStore(t, ""), "", "7778", t.TempDir())
+	ctx := context.Background()
+	srv.phoneCmd = fakeSbLink(t, 2, "", "sb-link: /p/.drafts/x.md is inside '.drafts/', which SilverBullet doesn't serve\n")
+	if url, err := srv.makePhonePage(ctx, "/p/.drafts/x.md"); url != "" || err == nil || err.Error() != "sb-link: /p/.drafts/x.md is inside '.drafts/', which SilverBullet doesn't serve" {
 		t.Errorf("exit 2: got %q, %v; want no page and sb-link's reason", url, err)
 	}
 
-	fakeSbLink(t, 1, "", "sb-link: login failed: {'status': 'error'}\n")
-	if _, err := phonePageFor("sb-link")("/p/x.md"); err == nil || !strings.Contains(err.Error(), "login failed") {
+	srv.phoneCmd = fakeSbLink(t, 1, "", "sb-link: login failed: {'status': 'error'}\n")
+	if _, err := srv.makePhonePage(ctx, "/p/x.md"); err == nil || !strings.Contains(err.Error(), "login failed") {
 		t.Errorf("exit 1: err = %v; want sb-link's reason", err)
 	}
 
-	fakeSbLink(t, 0, "https://sb.example:3000/p/x\n", "")
-	if url, err := phonePageFor("sb-link")("/p/x.md"); url != "https://sb.example:3000/p/x" || err != nil {
+	srv.phoneCmd = fakeSbLink(t, 4, "https://sb.example:3000/p/x\n", "sb-link: SilverBullet is down\n")
+	if url, err := srv.makePhonePage(ctx, "/p/x.md"); url != "" || err == nil {
+		t.Errorf("exit 4: got %q, %v; want no page (SilverBullet was down)", url, err)
+	}
+
+	srv.phoneCmd = fakeSbLink(t, 0, "https://sb.example:3000/p/x\n", "")
+	if url, err := srv.makePhonePage(ctx, "/p/x.md"); url != "https://sb.example:3000/p/x" || err != nil {
 		t.Errorf("exit 0: got %q, %v", url, err)
 	}
 
-	t.Setenv("PATH", t.TempDir()) // no sb-link: this Mac has no SilverBullet
-	if url, err := phonePageFor("sb-link")("/p/x.md"); url != "" || err != nil {
+	srv.phoneCmd = "sb-link-nowhere" // no such command: this Mac has no SilverBullet
+	if url, err := srv.makePhonePage(ctx, "/p/x.md"); url != "" || err != nil {
 		t.Errorf("no sb-link: got %q, %v; want nothing and no note", url, err)
 	}
 }
@@ -168,11 +178,10 @@ func TestRelinkGivesAnEarlierLinkItsSilverBulletPage(t *testing.T) {
 	hub := api{base: local.URL, token: testToken, client: local.Client()}
 	o := linkOptions{home: home, hubURL: "https://hub.example.ts.net",
 		register:  func(target string) (string, string, error) { return postLink(hub, target, Meta{Origin: "sl-link"}) },
-		phonePage: phonePageFor("sb-link"),
-		savePhone: func(slug, url string) error { return postPhone(hub, slug, url) },
+		phonePage: func(slug string) (phonePageReply, error) { return postPhonePage(hub, slug) },
 	}
 
-	fakeSbLink(t, 2, "", "sb-link: "+doc+" is inside '.drafts/', which SilverBullet doesn't serve\n")
+	srv.phoneCmd = fakeSbLink(t, 2, "", "sb-link: "+doc+" is inside '.drafts/', which SilverBullet doesn't serve\n")
 	var out, errOut bytes.Buffer
 	if code := linkPaths([]string{doc}, o, &out, &errOut); code != exitOK {
 		t.Errorf("first run: code = %d, want 0 (the link works either way)", code)
@@ -187,7 +196,7 @@ func TestRelinkGivesAnEarlierLinkItsSilverBulletPage(t *testing.T) {
 		t.Errorf("first run: phone goes to %q, want /f/%s", loc, slug)
 	}
 
-	fakeSbLink(t, 0, "https://hub.example.ts.net:3000/app/plan\n", "")
+	srv.phoneCmd = fakeSbLink(t, 0, "https://hub.example.ts.net:3000/app/plan\n", "")
 	out.Reset()
 	errOut.Reset()
 	linkPaths([]string{doc}, o, &out, &errOut)
@@ -227,14 +236,17 @@ func TestPostLinkAndPhoneAgainstHubAndAgent(t *testing.T) {
 	if err != nil || slug != "notes-md" || phone != "" {
 		t.Errorf("hub: postLink = %q, %q, %v; want notes-md and no phone page", slug, phone, err)
 	}
-	if err := postPhone(hub, "notes-md", "https://hub.example.ts.net:3000/notes"); err != nil {
-		t.Fatalf("postPhone: %v", err)
+	setPhone := func(url string) error {
+		return hub.do(http.MethodPost, "/api/links/notes-md/phone", map[string]string{"url": url}, nil)
+	}
+	if err := setPhone("https://hub.example.ts.net:3000/notes"); err != nil {
+		t.Fatalf("set phone: %v", err)
 	}
 	if _, phone, _ := postLink(hub, "~/Documents/notes.md", Meta{Origin: "sl-link"}); phone != "https://hub.example.ts.net:3000/notes" {
 		t.Errorf("relink: phone = %q, want the saved page", phone)
 	}
-	if err := postPhone(hub, "notes-md", "javascript:alert(1)"); err == nil {
-		t.Error("postPhone accepted a non-http URL")
+	if err := setPhone("javascript:alert(1)"); err == nil {
+		t.Error("the hub accepted a non-http phone page")
 	}
 	if _, _, err := postLink(hub, "https://example.com", Meta{Origin: "sl-link"}); err == nil || !strings.Contains(err.Error(), "hub refused") {
 		t.Errorf("hub, URL target: err = %v, want hub refused", err)
