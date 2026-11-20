@@ -6,6 +6,18 @@ on Mac and iOS, opens files and folders on whichever Mac you clicked, and
 serves them to phones. One Go binary, no dependencies, nothing leaves your
 Tailscale network.
 
+## Set it up with your agent
+
+[`skills/any-device-files`](skills/any-device-files/SKILL.md) is a guide a coding
+agent follows to set up shortlinker with Tailscale and SilverBullet. Then everything
+your agent makes (screenshots, videos, PDFs, Markdown, code) opens on your laptop or
+your phone, and you can edit Markdown and code from the phone. Tell your agent:
+
+    Follow https://github.com/loschenbd/shortlinker/blob/main/skills/any-device-files/SKILL.md
+
+Or copy the folder into `~/.claude/skills/` for Claude Code. It asks before each
+install and leaves every sign-in and password to you.
+
 ## Install
 
 **Hub (the designated, usually-awake Mac):**
